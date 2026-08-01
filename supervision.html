@@ -151,6 +151,7 @@
         <p id="lastUpdate" class="muted">Aucune URL enregistrée.</p>
       </div>
       <div class="topbar-actions">
+        <button id="soundBtn" class="btn" type="button">Alerte sonore : activée</button>
         <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
         <button id="exportBtn" class="btn" type="button">Exporter</button>
         <button id="importBtn" class="btn" type="button">Importer</button>
@@ -288,7 +289,7 @@
       const JITTER_RATIO = 0.1;
 
       const $ = (id) => document.getElementById(id);
-      const store = { items: [], paused: false };
+      const store = { items: [], paused: false, sound: true };
       const inFlightHosts = new Set();
       let inFlight = 0;
 
@@ -314,6 +315,7 @@
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed.items)) store.items = parsed.items;
           store.paused = parsed.paused === true;
+          store.sound = parsed.sound !== false;
         } catch {
           /* Configuration illisible : on repart d'une liste vide plutôt que de bloquer. */
         }
@@ -413,6 +415,26 @@
         }
       }
 
+      /** Bip d'alerte synthétisé : évite d'embarquer un fichier son dans la page. */
+      function beep() {
+        if (!store.sound) return;
+        try {
+          const audio = new (window.AudioContext ?? window.webkitAudioContext)();
+          const oscillator = audio.createOscillator();
+          const gain = audio.createGain();
+          oscillator.type = 'sine';
+          oscillator.frequency.value = 660;
+          gain.gain.setValueAtTime(0.16, audio.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.7);
+          oscillator.connect(gain).connect(audio.destination);
+          oscillator.start();
+          oscillator.stop(audio.currentTime + 0.7);
+          oscillator.onended = () => audio.close();
+        } catch {
+          /* Le navigateur peut refuser le son tant que la page n'a pas été cliquée. */
+        }
+      }
+
       async function checkItem(item) {
         const host = hostOf(item.url);
         inFlightHosts.add(host);
@@ -420,6 +442,7 @@
         try {
           const result = await probe(item);
           const failed = result.status === 'down';
+          const wasDown = item.status === 'down';
           item.failures = failed ? (item.failures ?? 0) + 1 : 0;
           // Un incident réseau isolé ne doit pas faire passer un projet en rouge.
           item.status = failed ? (item.failures >= FAILURE_THRESHOLD ? 'down' : 'degraded') : result.status;
@@ -437,6 +460,8 @@
           // On espace les tests d'un service durablement en panne.
           const spaced = item.failures >= 5 ? Math.min(interval * 4, 900) : interval;
           item.nextCheck = Date.now() + withJitter(spaced) * 1000;
+          // On n'alerte qu'au basculement en panne, pas à chaque test qui échoue.
+          if (item.status === 'down' && !wasDown) beep();
           save();
           render();
         } finally {
@@ -537,6 +562,13 @@
             ]),
           ),
         );
+
+        // Compteur repris dans le titre : visible dans l'onglet sans revenir sur la page.
+        const alerting = (counts.down ?? 0) + (counts.degraded ?? 0);
+        document.title = alerting
+          ? `(${alerting}) Supervision des URL projets`
+          : 'Supervision des URL projets';
+        $('soundBtn').textContent = `Alerte sonore : ${store.sound ? 'activée' : 'coupée'}`;
 
         $('lastUpdate').textContent = store.items.length
           ? `${store.items.length} URL surveillées — actualisé à ${new Date().toLocaleTimeString('fr-FR')}${store.paused ? ' — SURVEILLANCE EN PAUSE' : ''}`
@@ -674,6 +706,13 @@
         render();
         $('formDialog').close();
         tick();
+      });
+
+      $('soundBtn').addEventListener('click', () => {
+        store.sound = !store.sound;
+        save();
+        render();
+        if (store.sound) beep();
       });
 
       $('pauseBtn').addEventListener('click', () => {
