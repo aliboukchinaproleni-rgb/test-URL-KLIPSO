@@ -72,6 +72,48 @@ npm start
 
 Jeu de données de démonstration (facultatif) : `npm run seed`
 
+## Comment tester l'outil
+
+Un faux serveur est fourni : il reproduit toutes les pannes que l'outil doit détecter, **sans
+solliciter le moindre serveur client**.
+
+Dans un premier terminal, lancer l'application :
+
+```bash
+npm install
+npm run dev
+```
+
+Dans un second terminal, lancer le serveur de test :
+
+```bash
+npm run demo
+```
+
+Ouvrir http://localhost:3000, créer un projet (bouton « Nouveau projet »), puis ajouter les URL
+ci-dessous avec « Ajouter une URL ». Le bouton **Tester** de chaque ligne force un test immédiat,
+sans attendre la prochaine échéance.
+
+| URL à saisir | Réglage particulier | Résultat attendu |
+|---|---|---|
+| `http://127.0.0.1:4599/ok` | Texte devant être présent : `Connexion` | 🟢 Opérationnel |
+| `http://127.0.0.1:4599/lent` | Seuil « lent » : `500` ms | 🟠 Lent (~1500 ms) |
+| `http://127.0.0.1:4599/erreur-500` | — | 🔴 En panne après 3 tests — `HTTP 500 (attendu 200)` |
+| `http://127.0.0.1:4599/erreur-cachee` | Texte signalant une erreur : `Erreur serveur` | 🔴 En panne — page en 200 mais en erreur |
+| `http://127.0.0.1:4599/gel` | Timeout : `3000` ms | 🔴 En panne — `Délai dépassé` |
+| `http://127.0.0.1:9999/` | — | 🔴 En panne — `Connexion refusée par le serveur` |
+
+Points à observer au passage :
+
+- Les trois premiers tests d'une URL en erreur l'affichent en **Instable** (orange foncé) ; ce n'est
+  qu'au troisième échec consécutif qu'elle passe en **En panne**. C'est le filtre anti-fausse-alerte.
+- L'URL `/erreur-cachee` renvoie un code 200 : sans le champ « Texte signalant une erreur », elle
+  apparaîtrait à tort en vert. C'est le réglage à ne pas oublier sur les back-offices.
+- Le bouton **Détail** affiche l'historique, la latence et les incidents ouverts/résolus.
+- Le bouton **Mettre en pause** arrête tous les tests, par exemple pendant une mise en production.
+
+Pour repartir d'une base vierge, supprimer le dossier `data/`.
+
 ## Configuration
 
 Toutes les variables sont facultatives ; les valeurs par défaut conviennent à un usage courant.

@@ -12,7 +12,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "demo": "node scripts/serveur-de-test.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.4",
