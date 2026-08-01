@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supervision des URL projets</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"
+    />
+    <style>
+      :root {
+        --bg: #f4f6fa; --surface: #fff; --border: #dfe4ee; --text: #16202f;
+        --muted: #667290; --accent: #2f5bd7;
+        --ok: #0f9d58; --ok-bg: #e6f5ec; --slow: #e08600; --slow-bg: #fdf1de;
+        --degraded: #d2691e; --degraded-bg: #fbeadd; --down: #d02f2f; --down-bg: #fbe6e6;
+        --paused: #7a8699; --paused-bg: #eceff4;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #11151c; --surface: #182029; --border: #2a3543; --text: #e6ecf5;
+          --muted: #93a1b8; --accent: #6b93ff; --ok-bg: #102c1e; --slow-bg: #33260f;
+          --degraded-bg: #331f12; --down-bg: #351718; --paused-bg: #222a34;
+        }
+      }
+      * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
+      body {
+        margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg); color: var(--text); font-size: 14px;
+      }
+      .topbar {
+        display: flex; flex-wrap: wrap; gap: 14px; align-items: center; justify-content: space-between;
+        padding: 14px 22px; background: var(--surface); border-bottom: 1px solid var(--border);
+        position: sticky; top: 0; z-index: 5;
+      }
+      .topbar h1 { margin: 0; font-size: 17px; }
+      .topbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      main { padding: 18px 22px 60px; max-width: 1500px; margin: 0 auto; }
+      .muted { color: var(--muted); margin: 4px 0 0; font-size: 12px; }
+      .btn {
+        border: 1px solid var(--border); background: var(--surface); color: var(--text);
+        border-radius: 8px; padding: 8px 13px; font-size: 13px; cursor: pointer; font-family: inherit;
+      }
+      .btn:hover { border-color: var(--accent); }
+      .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .btn-sm { padding: 4px 9px; font-size: 12px; }
+      .counters {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px; margin-bottom: 16px;
+      }
+      .counter {
+        background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted);
+        border-radius: 10px; padding: 11px 14px;
+      }
+      .counter strong { display: block; font-size: 25px; line-height: 1.2; }
+      .counter span { color: var(--muted); font-size: 12px; }
+      .counter[data-status="down"] { border-left-color: var(--down); }
+      .counter[data-status="degraded"] { border-left-color: var(--degraded); }
+      .counter[data-status="slow"] { border-left-color: var(--slow); }
+      .counter[data-status="ok"] { border-left-color: var(--ok); }
+      .counter[data-status="paused"] { border-left-color: var(--paused); }
+      .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+      .filters input, .filters select {
+        padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--surface); color: var(--text); font-size: 13px; font-family: inherit;
+      }
+      .filters input { flex: 1 1 240px; }
+      .table-wrap {
+        background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto;
+      }
+      table { width: 100%; border-collapse: collapse; min-width: 1080px; }
+      th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      th {
+        font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+        color: var(--muted); background: var(--bg); position: sticky; top: 0;
+      }
+      tbody tr:last-child td { border-bottom: none; }
+      tbody tr[data-status="down"] { background: var(--down-bg); }
+      tbody tr[data-status="degraded"] { background: var(--degraded-bg); }
+      tbody tr[data-status="slow"] { background: var(--slow-bg); }
+      .pill {
+        display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+        border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+      .pill[data-status="ok"] { color: var(--ok); background: var(--ok-bg); }
+      .pill[data-status="slow"] { color: var(--slow); background: var(--slow-bg); }
+      .pill[data-status="degraded"] { color: var(--degraded); background: var(--degraded-bg); }
+      .pill[data-status="down"] { color: var(--down); background: var(--down-bg); }
+      .pill[data-status="paused"], .pill[data-status="unknown"] { color: var(--muted); background: var(--paused-bg); }
+      .prio { font-weight: 700; font-size: 12px; }
+      .prio[data-p="P1"] { color: var(--down); }
+      .prio[data-p="P2"] { color: var(--slow); }
+      .prio[data-p="P3"] { color: var(--muted); }
+      .url-cell { max-width: 300px; }
+      .url-cell a { color: var(--accent); text-decoration: none; word-break: break-all; font-size: 12px; }
+      .detail-cell { max-width: 300px; font-size: 12px; color: var(--muted); }
+      .depth {
+        font-size: 10px; border: 1px solid var(--border); border-radius: 4px;
+        padding: 1px 5px; color: var(--muted); white-space: nowrap;
+      }
+      .row-actions { display: flex; gap: 6px; white-space: nowrap; }
+      .empty { padding: 26px; text-align: center; color: var(--muted); }
+      dialog {
+        border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+        color: var(--text); padding: 20px; width: min(820px, 94vw);
+      }
+      dialog::backdrop { background: rgba(10, 15, 25, .5); }
+      dialog h2 { margin: 0 0 6px; font-size: 16px; }
+      dialog label { display: block; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
+      dialog label.inline { display: flex; align-items: center; gap: 8px; color: var(--text); }
+      dialog input, dialog select, dialog textarea {
+        display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--border);
+        border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px; font-family: inherit;
+      }
+      dialog label.inline input { width: auto; margin: 0; }
+      dialog small { display: block; margin-top: 4px; font-size: 11px; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+      .span2 { grid-column: 1 / -1; }
+      @media (max-width: 620px) { .grid2 { grid-template-columns: 1fr; } }
+      dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 8px 0 0; padding: 0; }
+      .form-error {
+        color: var(--down); background: var(--down-bg); padding: 8px 10px;
+        border-radius: 8px; font-size: 12px; margin: 0 0 10px;
+      }
+      .notice {
+        background: var(--slow-bg); border: 1px solid var(--slow); color: var(--text);
+        border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 12.5px;
+      }
+      .notice strong { display: block; margin-bottom: 3px; }
+      .notice button { float: right; }
+      .sparkline { display: flex; gap: 2px; align-items: flex-end; height: 34px; margin: 10px 0 4px; }
+      .spark { flex: 1; min-width: 3px; border-radius: 2px 2px 0 0; background: var(--ok); }
+      .spark[data-status="slow"] { background: var(--slow); }
+      .spark[data-status="down"] { background: var(--down); }
+      .detail-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0;
+      }
+      .detail-grid div { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+      .detail-grid span { display: block; color: var(--muted); font-size: 11px; }
+      .detail-grid strong { font-size: 15px; }
+      .history { max-height: 230px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+      .history table { min-width: 0; }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Supervision des URL projets</h1>
+        <p id="lastUpdate" class="muted">Aucune URL enregistrée.</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
+        <button id="exportBtn" class="btn" type="button">Exporter</button>
+        <button id="importBtn" class="btn" type="button">Importer</button>
+        <button id="addBtn" class="btn btn-primary" type="button">Ajouter une URL</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="notice" id="notice">
+        <button class="btn btn-sm" type="button" id="noticeClose">J'ai compris</button>
+        <strong>Limite importante à connaître</strong>
+        Les tests sont effectués par votre navigateur, qui n'a pas le droit de lire le contenu d'un
+        site tiers. Sur la quasi-totalité des sites, le contrôle est donc <em>limité</em> : il détecte
+        un serveur injoignable, un délai dépassé et une lenteur, mais
+        <strong style="display:inline">une erreur HTTP 500 ou une page d'erreur s'affichera en vert</strong>,
+        car le navigateur voit seulement que le serveur a répondu. Pour détecter les erreurs serveur,
+        il faut la version installée sur un serveur. La surveillance ne tourne par ailleurs que tant
+        que cet onglet reste ouvert.
+      </div>
+
+      <section id="counters" class="counters"></section>
+
+      <section class="filters">
+        <input id="search" type="search" placeholder="Rechercher un projet, un client, une URL…" />
+        <select id="statusFilter">
+          <option value="">Tous les statuts</option>
+          <option value="down">En panne</option>
+          <option value="degraded">Instable</option>
+          <option value="slow">Lent</option>
+          <option value="ok">Opérationnel</option>
+          <option value="paused">En pause</option>
+        </select>
+        <select id="priorityFilter">
+          <option value="">Toutes les priorités</option>
+          <option value="P1">P1 — critique</option>
+          <option value="P2">P2 — important</option>
+          <option value="P3">P3 — secondaire</option>
+        </select>
+        <select id="kindFilter">
+          <option value="">Front et Back-office</option>
+          <option value="front">Front uniquement</option>
+          <option value="back">Back-office uniquement</option>
+        </select>
+      </section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Statut</th><th>Prio</th><th>Projet</th><th>Type</th><th>URL</th>
+              <th>Temps</th><th>Contrôle</th><th>Dernier test</th><th>Détail</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="gridBody"></tbody>
+        </table>
+        <p id="emptyState" class="empty">
+          Aucune URL surveillée. Cliquez sur « Ajouter une URL » pour commencer.
+        </p>
+      </section>
+    </main>
+
+    <dialog id="formDialog">
+      <form id="urlForm" method="dialog">
+        <h2 id="formTitle">Ajouter une URL</h2>
+        <p class="muted" style="margin-bottom:14px">
+          Les champs de texte ne sont exploitables que si le site autorise leur lecture (contrôle complet).
+        </p>
+        <input type="hidden" name="id" />
+        <div class="grid2">
+          <label>Projet<input name="project" required maxlength="120" placeholder="Ex. Salon Klipso" /></label>
+          <label>Client<input name="client" maxlength="120" placeholder="Ex. COMEXPOSIUM" /></label>
+          <label class="span2">URL<input name="url" type="url" required placeholder="https://…" /></label>
+          <label class="span2">Libellé<input name="label" maxlength="150" placeholder="Ex. Site inscription visiteurs" /></label>
+          <label>
+            Type
+            <select name="kind"><option value="front">Front</option><option value="back">Back-office</option></select>
+          </label>
+          <label>
+            Priorité
+            <select name="priority">
+              <option value="P1">P1 — critique</option>
+              <option value="P2" selected>P2 — important</option>
+              <option value="P3">P3 — secondaire</option>
+            </select>
+          </label>
+          <label>
+            Fréquence de test
+            <select name="intervalSec">
+              <option value="180">Toutes les 3 minutes</option>
+              <option value="300" selected>Toutes les 5 minutes</option>
+              <option value="600">Toutes les 10 minutes</option>
+              <option value="1800">Toutes les 30 minutes</option>
+            </select>
+          </label>
+          <label>Seuil « lent » (ms)<input name="slowMs" type="number" min="200" max="60000" value="3000" /></label>
+          <label>Délai d'attente maximum (ms)<input name="timeoutMs" type="number" min="1000" max="60000" value="10000" /></label>
+          <label>Statut HTTP attendu<input name="expectedStatus" type="number" min="100" max="599" value="200" /></label>
+          <label class="span2">
+            Texte devant être présent<input name="keywordExpect" maxlength="200" placeholder="Ex. Connexion" />
+            <small>Détecte les pages qui répondent normalement tout en affichant une erreur.</small>
+          </label>
+          <label class="span2">
+            Texte signalant une erreur<input name="keywordForbid" maxlength="200" placeholder="Ex. Erreur serveur" />
+          </label>
+          <label class="span2 inline"><input name="enabled" type="checkbox" checked /> Surveillance active</label>
+        </div>
+        <p class="form-error" id="formError" hidden></p>
+        <menu>
+          <button class="btn" type="button" data-close>Annuler</button>
+          <button class="btn btn-primary" type="submit">Enregistrer</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="detailDialog">
+      <div id="detailContent"></div>
+      <menu><button class="btn" type="button" data-close>Fermer</button></menu>
+    </dialog>
+
+    <input type="file" id="importFile" accept="application/json,.json" hidden />
+
+    <script>
+      'use strict';
+
+      const STORAGE_KEY = 'supervision-url-projets-v1';
+      const STATUS_LABELS = {
+        ok: 'Opérationnel', slow: 'Lent', degraded: 'Instable',
+        down: 'En panne', paused: 'En pause', unknown: 'En attente',
+      };
+      const COUNTER_ORDER = ['down', 'degraded', 'slow', 'ok', 'paused', 'unknown'];
+      const FAILURE_THRESHOLD = 3;
+      const MIN_INTERVAL_SEC = 60;
+      const MAX_CONCURRENT = 4;
+      const HISTORY_LIMIT = 40;
+      const JITTER_RATIO = 0.1;
+
+      const $ = (id) => document.getElementById(id);
+      const store = { items: [], paused: false };
+      const inFlightHosts = new Set();
+      let inFlight = 0;
+
+      function el(tag, props = {}, children = []) {
+        const node = document.createElement(tag);
+        for (const [key, value] of Object.entries(props)) {
+          if (key === 'dataset') Object.assign(node.dataset, value);
+          else if (key === 'class') node.className = value;
+          else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+          else if (value !== null && value !== undefined) node[key] = value;
+        }
+        for (const child of [].concat(children)) {
+          if (child === null || child === undefined) continue;
+          node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+        }
+        return node;
+      }
+
+      function load() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.items)) store.items = parsed.items;
+          store.paused = parsed.paused === true;
+        } catch {
+          /* Configuration illisible : on repart d'une liste vide plutôt que de bloquer. */
+        }
+      }
+
+      function save() {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+        } catch (err) {
+          console.warn('Sauvegarde impossible', err);
+        }
+      }
+
+      function hostOf(url) {
+        try { return new URL(url).host; } catch { return url; }
+      }
+
+      function withJitter(seconds) {
+        return Math.max(1, Math.round(seconds + (Math.random() * 2 - 1) * seconds * JITTER_RATIO));
+      }
+
+      function relativeTime(iso) {
+        if (!iso) return 'jamais';
+        const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+        if (seconds < 60) return `il y a ${Math.max(seconds, 0)} s`;
+        if (seconds < 3600) return `il y a ${Math.round(seconds / 60)} min`;
+        if (seconds < 86400) return `il y a ${Math.round(seconds / 3600)} h`;
+        return `il y a ${Math.round(seconds / 86400)} j`;
+      }
+
+      const formatDateTime = (iso) => (iso ? new Date(iso).toLocaleString('fr-FR') : '—');
+
+      function statusPill(status) {
+        return el('span', { class: 'pill', dataset: { status } }, [el('span', { class: 'dot' }), STATUS_LABELS[status] ?? status]);
+      }
+
+      /**
+       * Deux niveaux de contrôle. On tente d'abord la lecture complète : si le site
+       * l'autorise, on vérifie le code HTTP et le contenu. Sinon on se rabat sur une
+       * simple vérification de joignabilité, tout ce qu'un navigateur peut garantir.
+       */
+      async function probe(item) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), item.timeoutMs);
+        let startedAt = performance.now();
+        try {
+          try {
+            // Une fois la lecture refusée, inutile de la retenter à chaque passage :
+            // cela doublerait le nombre de requêtes envoyées au serveur surveillé.
+            if (item.corsBlocked) throw new Error('lecture déjà refusée');
+            const response = await fetch(item.url, {
+              cache: 'no-store', redirect: 'follow', signal: controller.signal,
+            });
+            const ms = Math.round(performance.now() - startedAt);
+            const problems = [];
+            if (response.status !== item.expectedStatus) {
+              problems.push(`HTTP ${response.status} (attendu ${item.expectedStatus})`);
+            }
+            if (item.keywordExpect || item.keywordForbid) {
+              const body = await response.text();
+              if (item.keywordExpect && !body.includes(item.keywordExpect)) {
+                problems.push(`Texte attendu absent : « ${item.keywordExpect} »`);
+              }
+              if (item.keywordForbid && body.includes(item.keywordForbid)) {
+                problems.push(`Texte d'erreur détecté : « ${item.keywordForbid} »`);
+              }
+            }
+            if (problems.length) {
+              return { status: 'down', ms, depth: 'complet', httpStatus: response.status, error: problems.join(' — ') };
+            }
+            return {
+              status: ms > item.slowMs ? 'slow' : 'ok',
+              ms, depth: 'complet', httpStatus: response.status, error: null,
+            };
+          } catch (corsError) {
+            if (controller.signal.aborted) throw corsError;
+            // Lecture refusée par le site : on retombe sur le contrôle de joignabilité.
+            item.corsBlocked = true;
+            startedAt = performance.now(); // Ne pas compter la tentative refusée dans le temps de réponse.
+            await fetch(item.url, {
+              mode: 'no-cors', cache: 'no-store', signal: controller.signal,
+            });
+            const ms = Math.round(performance.now() - startedAt);
+            return {
+              status: ms > item.slowMs ? 'slow' : 'ok',
+              ms, depth: 'limité', httpStatus: null, error: null,
+            };
+          }
+        } catch (err) {
+          const ms = Math.round(performance.now() - startedAt);
+          if (controller.signal.aborted) {
+            return { status: 'down', ms, depth: 'limité', httpStatus: null, error: `Délai dépassé (> ${item.timeoutMs} ms)` };
+          }
+          return { status: 'down', ms, depth: 'limité', httpStatus: null, error: 'Serveur injoignable (connexion, DNS ou certificat)' };
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      async function checkItem(item) {
+        const host = hostOf(item.url);
+        inFlightHosts.add(host);
+        inFlight += 1;
+        try {
+          const result = await probe(item);
+          const failed = result.status === 'down';
+          item.failures = failed ? (item.failures ?? 0) + 1 : 0;
+          // Un incident réseau isolé ne doit pas faire passer un projet en rouge.
+          item.status = failed ? (item.failures >= FAILURE_THRESHOLD ? 'down' : 'degraded') : result.status;
+          item.lastMs = result.ms;
+          item.depth = result.depth;
+          item.httpStatus = result.httpStatus;
+          item.lastError = result.error;
+          item.lastCheck = new Date().toISOString();
+          if (!failed) item.lastOk = item.lastCheck;
+          item.history = [
+            { at: item.lastCheck, status: result.status, ms: result.ms, error: result.error, httpStatus: result.httpStatus },
+            ...(item.history ?? []),
+          ].slice(0, HISTORY_LIMIT);
+          const interval = Math.max(item.intervalSec, MIN_INTERVAL_SEC);
+          // On espace les tests d'un service durablement en panne.
+          const spaced = item.failures >= 5 ? Math.min(interval * 4, 900) : interval;
+          item.nextCheck = Date.now() + withJitter(spaced) * 1000;
+          save();
+          render();
+        } finally {
+          inFlightHosts.delete(host);
+          inFlight -= 1;
+        }
+      }
+
+      function tick() {
+        if (store.paused) return;
+        const due = store.items
+          .filter((item) => item.enabled && (item.nextCheck ?? 0) <= Date.now())
+          .sort((a, b) => a.priority.localeCompare(b.priority));
+        for (const item of due) {
+          if (inFlight >= MAX_CONCURRENT) break;
+          if (inFlightHosts.has(hostOf(item.url))) continue;
+          checkItem(item);
+        }
+      }
+
+      function describeRow(item) {
+        if (!item.enabled) return 'Surveillance désactivée';
+        if (item.lastError) return item.lastError;
+        if (item.status === 'slow') return `Réponse au-delà du seuil de ${item.slowMs} ms`;
+        if (!item.lastCheck) return 'En attente du premier test';
+        if (item.depth === 'limité') return 'Serveur joignable — code HTTP non vérifiable';
+        return item.httpStatus ? `HTTP ${item.httpStatus}` : 'Aucun problème détecté';
+      }
+
+      const effectiveStatus = (item) => (item.enabled ? (item.status ?? 'unknown') : 'paused');
+
+      function visibleItems() {
+        const term = $('search').value.trim().toLowerCase();
+        const status = $('statusFilter').value;
+        const priority = $('priorityFilter').value;
+        const kind = $('kindFilter').value;
+        const rank = { down: 0, degraded: 1, slow: 2, unknown: 3, ok: 4, paused: 5 };
+        return store.items
+          .filter((item) => {
+            if (status && effectiveStatus(item) !== status) return false;
+            if (priority && item.priority !== priority) return false;
+            if (kind && item.kind !== kind) return false;
+            if (!term) return true;
+            return [item.project, item.client, item.label, item.url]
+              .filter(Boolean)
+              .some((field) => String(field).toLowerCase().includes(term));
+          })
+          .sort(
+            (a, b) =>
+              rank[effectiveStatus(a)] - rank[effectiveStatus(b)] ||
+              a.priority.localeCompare(b.priority) ||
+              String(a.project).localeCompare(String(b.project)),
+          );
+      }
+
+      function render() {
+        const counts = {};
+        for (const item of store.items) {
+          const key = effectiveStatus(item);
+          counts[key] = (counts[key] ?? 0) + 1;
+        }
+        $('counters').replaceChildren(
+          ...COUNTER_ORDER.filter((s) => counts[s] || s === 'down' || s === 'ok').map((status) =>
+            el('div', { class: 'counter', dataset: { status } }, [
+              el('strong', { textContent: String(counts[status] ?? 0) }),
+              el('span', { textContent: STATUS_LABELS[status] }),
+            ]),
+          ),
+        );
+
+        const rows = visibleItems();
+        $('emptyState').hidden = store.items.length > 0;
+        $('gridBody').replaceChildren(
+          ...rows.map((item) =>
+            el('tr', { dataset: { status: effectiveStatus(item) } }, [
+              el('td', {}, statusPill(effectiveStatus(item))),
+              el('td', {}, el('span', { class: 'prio', dataset: { p: item.priority }, textContent: item.priority })),
+              el('td', {}, [
+                el('div', { textContent: item.project }),
+                item.client ? el('small', { class: 'muted', textContent: item.client }) : null,
+              ]),
+              el('td', { textContent: item.kind === 'front' ? 'Front' : 'Back-office' }),
+              el('td', { class: 'url-cell' }, [
+                el('a', { href: item.url, target: '_blank', rel: 'noreferrer noopener', textContent: item.label || item.url }),
+              ]),
+              el('td', { textContent: item.lastMs ? `${item.lastMs} ms` : '—' }),
+              el('td', {}, item.depth ? el('span', { class: 'depth', textContent: item.depth }) : document.createTextNode('—')),
+              el('td', { textContent: relativeTime(item.lastCheck) }),
+              el('td', { class: 'detail-cell', textContent: describeRow(item) }),
+              el('td', {}, [
+                el('div', { class: 'row-actions' }, [
+                  el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Tester', onclick: () => checkItem(item) }),
+                  el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Détail', onclick: () => openDetail(item) }),
+                  el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Éditer', onclick: () => openForm(item) }),
+                  el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Suppr.', onclick: () => removeItem(item) }),
+                ]),
+              ]),
+            ]),
+          ),
+        );
+
+        $('lastUpdate').textContent = store.items.length
+          ? `${store.items.length} URL surveillées — actualisé à ${new Date().toLocaleTimeString('fr-FR')}${store.paused ? ' — SURVEILLANCE EN PAUSE' : ''}`
+          : 'Aucune URL enregistrée.';
+        $('pauseBtn').textContent = store.paused ? 'Reprendre la surveillance' : 'Mettre en pause';
+      }
+
+      function openForm(item = null) {
+        const form = $('urlForm');
+        form.reset();
+        $('formError').hidden = true;
+        $('formTitle').textContent = item ? "Modifier l'URL" : 'Ajouter une URL';
+        form.id.value = item ? item.id : '';
+        if (item) {
+          form.project.value = item.project ?? '';
+          form.client.value = item.client ?? '';
+          form.url.value = item.url;
+          form.label.value = item.label ?? '';
+          form.kind.value = item.kind;
+          form.priority.value = item.priority;
+          form.intervalSec.value = String(item.intervalSec);
+          form.slowMs.value = item.slowMs;
+          form.timeoutMs.value = item.timeoutMs;
+          form.expectedStatus.value = item.expectedStatus;
+          form.keywordExpect.value = item.keywordExpect ?? '';
+          form.keywordForbid.value = item.keywordForbid ?? '';
+          form.enabled.checked = item.enabled;
+        }
+        $('formDialog').showModal();
+      }
+
+      function openDetail(item) {
+        const history = item.history ?? [];
+        const maxMs = history.reduce((max, h) => Math.max(max, h.ms ?? 0), 0);
+        const avgMs = history.length
+          ? Math.round(history.reduce((sum, h) => sum + (h.ms ?? 0), 0) / history.length)
+          : null;
+        $('detailContent').replaceChildren(
+          el('h2', { textContent: item.label || item.url }),
+          el('p', {
+            class: 'muted',
+            textContent: `${item.project}${item.client ? ` — ${item.client}` : ''} · ${item.kind === 'front' ? 'Front' : 'Back-office'} · ${item.priority} · test toutes les ${Math.round(item.intervalSec / 60)} min`,
+          }),
+          el('div', { class: 'detail-grid' }, [
+            el('div', {}, [el('span', { textContent: 'Statut actuel' }), statusPill(effectiveStatus(item))]),
+            el('div', {}, [el('span', { textContent: 'Temps moyen' }), el('strong', { textContent: avgMs === null ? '—' : `${avgMs} ms` })]),
+            el('div', {}, [el('span', { textContent: 'Pic de latence' }), el('strong', { textContent: maxMs ? `${maxMs} ms` : '—' })]),
+            el('div', {}, [el('span', { textContent: 'Échecs consécutifs' }), el('strong', { textContent: String(item.failures ?? 0) })]),
+            el('div', {}, [el('span', { textContent: 'Dernier succès' }), el('strong', { textContent: relativeTime(item.lastOk) })]),
+            el('div', {}, [el('span', { textContent: 'Profondeur du contrôle' }), el('strong', { textContent: item.depth ?? '—' })]),
+          ]),
+          el('p', { class: 'muted', textContent: 'Historique récent (du plus ancien au plus récent)' }),
+          el('div', { class: 'sparkline' },
+            [...history].reverse().map((h) =>
+              el('div', {
+                class: 'spark',
+                dataset: { status: h.status },
+                title: `${formatDateTime(h.at)} — ${h.ms ?? '?'} ms${h.error ? ` — ${h.error}` : ''}`,
+                style: `height:${h.status === 'down' ? 100 : Math.max(8, Math.min(100, ((h.ms ?? 0) / Math.max(maxMs, 1)) * 100))}%`,
+              }),
+            ),
+          ),
+          el('div', { class: 'history' }, [
+            el('table', {}, [
+              el('thead', {}, el('tr', {}, [
+                el('th', { textContent: 'Date' }), el('th', { textContent: 'Statut' }),
+                el('th', { textContent: 'Temps' }), el('th', { textContent: 'Message' }),
+              ])),
+              el('tbody', {}, history.map((h) =>
+                el('tr', {}, [
+                  el('td', { textContent: formatDateTime(h.at) }),
+                  el('td', {}, statusPill(h.status)),
+                  el('td', { textContent: h.ms ? `${h.ms} ms` : '—' }),
+                  el('td', { textContent: h.error ?? '' }),
+                ]),
+              )),
+            ]),
+          ]),
+        );
+        $('detailDialog').showModal();
+      }
+
+      function removeItem(item) {
+        if (!confirm(`Supprimer la surveillance de ${item.url} ?`)) return;
+        store.items = store.items.filter((candidate) => candidate.id !== item.id);
+        save();
+        render();
+      }
+
+      $('urlForm').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const form = event.target;
+        const data = Object.fromEntries(new FormData(form));
+        let url;
+        try {
+          url = new URL(data.url);
+        } catch {
+          $('formError').textContent = "L'URL n'est pas valide. Exemple : https://exemple.fr/admin";
+          $('formError').hidden = false;
+          return;
+        }
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+          $('formError').textContent = 'Seules les URL http:// et https:// peuvent être surveillées.';
+          $('formError').hidden = false;
+          return;
+        }
+
+        const values = {
+          project: data.project.trim(),
+          client: data.client.trim(),
+          url: url.toString(),
+          label: data.label.trim(),
+          kind: data.kind,
+          priority: data.priority,
+          intervalSec: Math.max(MIN_INTERVAL_SEC, Number(data.intervalSec) || 300),
+          slowMs: Number(data.slowMs) || 3000,
+          timeoutMs: Number(data.timeoutMs) || 10000,
+          expectedStatus: Number(data.expectedStatus) || 200,
+          keywordExpect: data.keywordExpect.trim(),
+          keywordForbid: data.keywordForbid.trim(),
+          enabled: form.enabled.checked,
+        };
+
+        const existing = store.items.find((item) => item.id === data.id);
+        if (existing) {
+          Object.assign(existing, values, { nextCheck: 0 });
+        } else {
+          store.items.push({
+            id: `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
+            ...values,
+            status: 'unknown', failures: 0, history: [], nextCheck: 0,
+          });
+        }
+        save();
+        render();
+        $('formDialog').close();
+        tick();
+      });
+
+      $('pauseBtn').addEventListener('click', () => {
+        store.paused = !store.paused;
+        save();
+        render();
+      });
+
+      $('exportBtn').addEventListener('click', () => {
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          items: store.items.map(({ history, ...rest }) => rest),
+        };
+        const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+        const link = el('a', { href: url, download: 'supervision-urls.json' });
+        document.body.append(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      });
+
+      $('importBtn').addEventListener('click', () => $('importFile').click());
+
+      $('importFile').addEventListener('change', async (event) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        try {
+          const parsed = JSON.parse(await file.text());
+          if (!Array.isArray(parsed.items)) throw new Error('format');
+          const known = new Set(store.items.map((item) => item.url + item.kind));
+          const added = parsed.items.filter((item) => item.url && !known.has(item.url + item.kind));
+          store.items.push(
+            ...added.map((item) => ({
+              ...item,
+              id: `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
+              status: 'unknown', failures: 0, history: [], nextCheck: 0,
+            })),
+          );
+          save();
+          render();
+          alert(`${added.length} URL importée(s).`);
+        } catch {
+          alert("Fichier illisible : sélectionnez un export généré par cet outil.");
+        }
+        event.target.value = '';
+      });
+
+      $('noticeClose').addEventListener('click', () => {
+        $('notice').hidden = true;
+        localStorage.setItem(STORAGE_KEY + '-notice', '1');
+      });
+
+      for (const button of document.querySelectorAll('[data-close]')) {
+        button.addEventListener('click', () => button.closest('dialog').close());
+      }
+      for (const control of ['search', 'statusFilter', 'priorityFilter', 'kindFilter']) {
+        $(control).addEventListener('input', render);
+      }
+      $('addBtn').addEventListener('click', () => openForm());
+
+      load();
+      if (localStorage.getItem(STORAGE_KEY + '-notice') === '1') $('notice').hidden = true;
+      render();
+      setInterval(tick, 5000);
+      setInterval(render, 20000);
+      tick();
+    </script>
+  </body>
+</html>
