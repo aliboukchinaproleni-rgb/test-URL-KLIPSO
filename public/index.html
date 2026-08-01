@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supervision des URL projets</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1>Supervision des URL projets</h1>
+        <p id="lastUpdate" class="muted">Chargement…</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="pauseBtn" class="btn btn-ghost" type="button">Mettre en pause</button>
+        <button id="newProjectBtn" class="btn btn-ghost" type="button">Nouveau projet</button>
+        <button id="newEndpointBtn" class="btn btn-primary" type="button">Ajouter une URL</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="counters" class="counters" aria-label="Synthèse"></section>
+
+      <section class="filters">
+        <input id="search" type="search" placeholder="Rechercher un projet, un client, une URL…" />
+        <select id="statusFilter">
+          <option value="">Tous les statuts</option>
+          <option value="down">En panne</option>
+          <option value="degraded">Instable</option>
+          <option value="slow">Lent</option>
+          <option value="ok">Opérationnel</option>
+          <option value="paused">En pause</option>
+        </select>
+        <select id="priorityFilter">
+          <option value="">Toutes les priorités</option>
+          <option value="P1">P1 — critique</option>
+          <option value="P2">P2 — important</option>
+          <option value="P3">P3 — secondaire</option>
+        </select>
+        <select id="kindFilter">
+          <option value="">Front et Back-office</option>
+          <option value="front">Front uniquement</option>
+          <option value="back">Back-office uniquement</option>
+        </select>
+      </section>
+
+      <section class="table-wrap">
+        <table id="grid">
+          <thead>
+            <tr>
+              <th>Statut</th>
+              <th>Prio</th>
+              <th>Projet</th>
+              <th>Type</th>
+              <th>URL</th>
+              <th>Temps</th>
+              <th>Dispo. 7j</th>
+              <th>Dernier test</th>
+              <th>Détail</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="gridBody"></tbody>
+        </table>
+        <p id="emptyState" class="empty" hidden>
+          Aucune URL surveillée pour le moment. Créez un projet, puis ajoutez ses URL front et
+          back-office.
+        </p>
+      </section>
+    </main>
+
+    <dialog id="projectDialog" class="dialog">
+      <form id="projectForm" method="dialog">
+        <h2>Projet</h2>
+        <label>Nom du projet<input name="name" required maxlength="200" /></label>
+        <label>Client<input name="client" maxlength="200" /></label>
+        <label>Chef de projet<input name="owner" maxlength="200" /></label>
+        <label>Notes<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
+        <p class="form-error" id="projectError" hidden></p>
+        <menu>
+          <button value="cancel" class="btn btn-ghost" type="button" data-close>Annuler</button>
+          <button value="save" class="btn btn-primary" type="submit">Enregistrer</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="endpointDialog" class="dialog dialog-wide">
+      <form id="endpointForm" method="dialog">
+        <h2 id="endpointDialogTitle">Ajouter une URL</h2>
+        <input type="hidden" name="id" />
+        <div class="grid2">
+          <label>Projet<select name="project_id" required></select></label>
+          <label>
+            Type
+            <select name="kind">
+              <option value="front">Front</option>
+              <option value="back">Back-office</option>
+            </select>
+          </label>
+          <label class="span2">URL<input name="url" type="url" required placeholder="https://…" /></label>
+          <label class="span2">Libellé<input name="label" maxlength="200" placeholder="Ex. Site inscription visiteurs" /></label>
+          <label>
+            Priorité
+            <select name="priority">
+              <option value="P1">P1 — critique</option>
+              <option value="P2" selected>P2 — important</option>
+              <option value="P3">P3 — secondaire</option>
+            </select>
+          </label>
+          <label>
+            Fréquence de test
+            <select name="interval_seconds">
+              <option value="180">Toutes les 3 minutes</option>
+              <option value="300" selected>Toutes les 5 minutes</option>
+              <option value="600">Toutes les 10 minutes</option>
+              <option value="1800">Toutes les 30 minutes</option>
+              <option value="3600">Toutes les heures</option>
+            </select>
+          </label>
+          <label>Statut HTTP attendu<input name="expected_status" type="number" min="100" max="599" value="200" /></label>
+          <label>
+            Méthode
+            <select name="method">
+              <option value="GET">GET</option>
+              <option value="HEAD">HEAD (plus léger)</option>
+            </select>
+          </label>
+          <label>Seuil « lent » (ms)<input name="slow_ms" type="number" min="200" max="60000" value="3000" /></label>
+          <label>Timeout (ms)<input name="timeout_ms" type="number" min="1000" max="60000" value="10000" /></label>
+          <label class="span2">
+            Texte devant être présent
+            <input name="keyword_expect" maxlength="500" placeholder="Ex. Connexion" />
+            <small>Détecte les pages qui répondent 200 tout en affichant une erreur applicative.</small>
+          </label>
+          <label class="span2">
+            Texte signalant une erreur
+            <input name="keyword_forbid" maxlength="500" placeholder="Ex. Erreur serveur" />
+          </label>
+          <label>Identifiant (auth. basique)<input name="auth_user" maxlength="200" autocomplete="off" /></label>
+          <label>
+            Mot de passe<input name="auth_pass" type="password" maxlength="500" autocomplete="new-password" />
+            <small id="authHint" hidden>Laisser vide pour conserver le mot de passe actuel.</small>
+          </label>
+          <label class="span2 inline">
+            <input name="enabled" type="checkbox" checked /> Surveillance active
+          </label>
+        </div>
+        <p class="form-error" id="endpointError" hidden></p>
+        <menu>
+          <button value="cancel" class="btn btn-ghost" type="button" data-close>Annuler</button>
+          <button value="save" class="btn btn-primary" type="submit">Enregistrer</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="detailDialog" class="dialog dialog-wide">
+      <div id="detailContent"></div>
+      <menu>
+        <button class="btn btn-ghost" type="button" data-close>Fermer</button>
+      </menu>
+    </dialog>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
