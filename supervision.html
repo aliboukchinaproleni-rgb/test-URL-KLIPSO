@@ -156,7 +156,7 @@
         <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
         <button id="exportBtn" class="btn" type="button">Exporter</button>
         <button id="importBtn" class="btn" type="button">Importer</button>
-        <button id="addBtn" class="btn btn-primary" type="button">Ajouter une URL</button>
+        <button id="addBtn" class="btn btn-primary" type="button">Ajouter un projet</button>
       </div>
     </header>
 
@@ -190,6 +190,9 @@
           <option value="P2">P2 — important</option>
           <option value="P3">P3 — secondaire</option>
         </select>
+        <select id="ownerFilter">
+          <option value="">Tous les chefs de projet</option>
+        </select>
         <select id="kindFilter">
           <option value="">Front et Back-office</option>
           <option value="front">Front uniquement</option>
@@ -208,27 +211,46 @@
           <tbody id="gridBody"></tbody>
         </table>
         <p id="emptyState" class="empty">
-          Aucune URL surveillée. Cliquez sur « Ajouter une URL » pour commencer.
+          Aucune URL surveillée. Cliquez sur « Ajouter un projet » pour commencer.
         </p>
       </section>
     </main>
 
     <dialog id="formDialog">
       <form id="urlForm" method="dialog">
-        <h2 id="formTitle">Ajouter une URL</h2>
-        <p class="muted" style="margin-bottom:14px">
-          Les champs de texte ne sont exploitables que si le site autorise leur lecture (contrôle complet).
+        <h2 id="formTitle">Ajouter un projet</h2>
+        <p class="muted" id="formHint" style="margin-bottom:14px">
+          Renseignez le front et le back-office en une seule fois : les réglages ci-dessous
+          s'appliquent aux deux. Une seule des deux URL suffit.
         </p>
         <input type="hidden" name="id" />
         <div class="grid2">
           <label>Projet<input name="project" required maxlength="120" placeholder="Ex. Salon Klipso" /></label>
           <label>Client<input name="client" maxlength="120" placeholder="Ex. COMEXPOSIUM" /></label>
-          <label class="span2">URL<input name="url" type="url" required placeholder="https://…" /></label>
-          <label class="span2">Libellé<input name="label" maxlength="150" placeholder="Ex. Site inscription visiteurs" /></label>
+          <label class="span2">
+            Chef de projet en charge
+            <input name="owner" maxlength="120" list="ownerList" placeholder="Ex. Prénom Nom" />
+            <datalist id="ownerList"></datalist>
+          </label>
+        </div>
+
+        <div class="grid2" id="addUrls">
+          <label>URL du front<input name="urlFront" type="url" placeholder="https://…" /></label>
+          <label>Libellé du front<input name="labelFront" maxlength="150" placeholder="Ex. Site inscription visiteurs" /></label>
+          <label>URL du back-office<input name="urlBack" type="url" placeholder="https://…" /></label>
+          <label>Libellé du back-office<input name="labelBack" maxlength="150" placeholder="Ex. Administration badges" /></label>
+        </div>
+
+        <div class="grid2" id="editUrl" hidden>
+          <label class="span2">URL<input name="url" type="url" placeholder="https://…" /></label>
+          <label>Libellé<input name="label" maxlength="150" /></label>
           <label>
             Type
             <select name="kind"><option value="front">Front</option><option value="back">Back-office</option></select>
           </label>
+        </div>
+
+        <div class="grid2">
           <label>
             Priorité
             <select name="priority">
@@ -591,14 +613,16 @@
         const status = $('statusFilter').value;
         const priority = $('priorityFilter').value;
         const kind = $('kindFilter').value;
+        const owner = $('ownerFilter').value;
         const rank = { down: 0, degraded: 1, slow: 2, unknown: 3, ok: 4, paused: 5 };
         return store.items
           .filter((item) => {
             if (status && effectiveStatus(item) !== status) return false;
             if (priority && item.priority !== priority) return false;
             if (kind && item.kind !== kind) return false;
+            if (owner && (item.owner ?? '') !== owner) return false;
             if (!term) return true;
-            return [item.project, item.client, item.label, item.url]
+            return [item.project, item.client, item.owner, item.label, item.url]
               .filter(Boolean)
               .some((field) => String(field).toLowerCase().includes(term));
           })
@@ -611,6 +635,19 @@
       }
 
       function render() {
+        // La liste des CDP se construit à partir des projets saisis, sans double saisie.
+        const owners = [...new Set(store.items.map((item) => item.owner).filter(Boolean))].sort();
+        const ownerFilter = $('ownerFilter');
+        if (ownerFilter.dataset.owners !== owners.join('|')) {
+          ownerFilter.dataset.owners = owners.join('|');
+          const selected = ownerFilter.value;
+          ownerFilter.replaceChildren(
+            el('option', { value: '', textContent: 'Tous les chefs de projet' }),
+            ...owners.map((owner) => el('option', { value: owner, textContent: owner })),
+          );
+          ownerFilter.value = owners.includes(selected) ? selected : '';
+        }
+
         const counts = {};
         for (const item of store.items) {
           const key = effectiveStatus(item);
@@ -634,7 +671,10 @@
               el('td', {}, el('span', { class: 'prio', dataset: { p: item.priority }, textContent: item.priority })),
               el('td', {}, [
                 el('div', { textContent: item.project }),
-                item.client ? el('small', { class: 'muted', textContent: item.client }) : null,
+                el('small', {
+                  class: 'muted',
+                  textContent: [item.client, item.owner].filter(Boolean).join(' — '),
+                }),
               ]),
               el('td', { textContent: item.kind === 'front' ? 'Front' : 'Back-office' }),
               el('td', { class: 'url-cell' }, [
@@ -673,11 +713,23 @@
         const form = $('urlForm');
         form.reset();
         $('formError').hidden = true;
-        $('formTitle').textContent = item ? "Modifier l'URL" : 'Ajouter une URL';
+        $('formTitle').textContent = item ? "Modifier l'URL" : 'Ajouter un projet';
+        $('formHint').hidden = Boolean(item);
+        $('addUrls').hidden = Boolean(item);
+        $('editUrl').hidden = !item;
+        // Le champ obligatoire diffère selon le mode, sinon le navigateur bloque
+        // la validation sur un champ masqué.
+        form.url.required = Boolean(item);
+        $('ownerList').replaceChildren(
+          ...[...new Set(store.items.map((entry) => entry.owner).filter(Boolean))]
+            .sort()
+            .map((owner) => el('option', { value: owner })),
+        );
         form.id.value = item ? item.id : '';
         if (item) {
           form.project.value = item.project ?? '';
           form.client.value = item.client ?? '';
+          form.owner.value = item.owner ?? '';
           form.url.value = item.url;
           form.label.value = item.label ?? '';
           form.kind.value = item.kind;
@@ -703,7 +755,7 @@
           el('h2', { textContent: item.label || item.url }),
           el('p', {
             class: 'muted',
-            textContent: `${item.project}${item.client ? ` — ${item.client}` : ''} · ${item.kind === 'front' ? 'Front' : 'Back-office'} · ${item.priority} · test toutes les ${Math.round(item.intervalSec / 60)} min`,
+            textContent: `${[item.project, item.client, item.owner].filter(Boolean).join(' — ')} · ${item.kind === 'front' ? 'Front' : 'Back-office'} · ${item.priority} · test toutes les ${Math.round(item.intervalSec / 60)} min`,
           }),
           el('div', { class: 'detail-grid' }, [
             el('div', {}, [el('span', { textContent: 'Statut actuel' }), statusPill(effectiveStatus(item))]),
@@ -755,26 +807,46 @@
         event.preventDefault();
         const form = event.target;
         const data = Object.fromEntries(new FormData(form));
-        let url;
+        const editing = store.items.find((item) => item.id === data.id);
+
+        const fail = (message) => {
+          $('formError').textContent = message;
+          $('formError').hidden = false;
+        };
+        const normalise = (raw) => {
+          const value = raw.trim();
+          if (!value) return null;
+          let parsed;
+          try {
+            parsed = new URL(value);
+          } catch {
+            throw new Error(`L'adresse « ${value} » n'est pas valide. Exemple : https://exemple.fr/admin`);
+          }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('Seules les adresses http:// et https:// peuvent être surveillées.');
+          }
+          return parsed.toString();
+        };
+
+        let targets;
         try {
-          url = new URL(data.url);
-        } catch {
-          $('formError').textContent = "L'URL n'est pas valide. Exemple : https://exemple.fr/admin";
-          $('formError').hidden = false;
-          return;
+          targets = editing
+            ? [{ url: normalise(data.url), kind: data.kind, label: data.label.trim() }]
+            : [
+                { url: normalise(data.urlFront), kind: 'front', label: data.labelFront.trim() },
+                { url: normalise(data.urlBack), kind: 'back', label: data.labelBack.trim() },
+              ].filter((target) => target.url);
+        } catch (err) {
+          return fail(err.message);
         }
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-          $('formError').textContent = 'Seules les URL http:// et https:// peuvent être surveillées.';
-          $('formError').hidden = false;
-          return;
+        if (!targets.length || !targets[0].url) {
+          return fail('Indiquez au moins une adresse : le front, le back-office, ou les deux.');
         }
 
         const values = {
           project: data.project.trim(),
           client: data.client.trim(),
-          url: url.toString(),
-          label: data.label.trim(),
-          kind: data.kind,
+          owner: data.owner.trim(),
           priority: data.priority,
           intervalSec: Math.max(MIN_INTERVAL_SEC, Number(data.intervalSec) || 300),
           slowMs: Number(data.slowMs) || 3000,
@@ -785,15 +857,18 @@
           enabled: form.enabled.checked,
         };
 
-        const existing = store.items.find((item) => item.id === data.id);
-        if (existing) {
-          Object.assign(existing, values, { nextCheck: 0 });
+        if (editing) {
+          Object.assign(editing, values, targets[0], { nextCheck: 0 });
         } else {
-          store.items.push({
-            id: `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
-            ...values,
-            status: 'unknown', failures: 0, history: [], nextCheck: 0,
-          });
+          store.items.push(
+            ...targets.map((target) => ({
+              id: `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
+              ...values,
+              ...target,
+              label: target.label || (target.kind === 'front' ? 'Front' : 'Back-office'),
+              status: 'unknown', failures: 0, history: [], nextCheck: 0,
+            })),
+          );
         }
         save();
         render();
@@ -921,7 +996,7 @@
       for (const button of document.querySelectorAll('[data-close]')) {
         button.addEventListener('click', () => button.closest('dialog').close());
       }
-      for (const control of ['search', 'statusFilter', 'priorityFilter', 'kindFilter']) {
+      for (const control of ['search', 'statusFilter', 'priorityFilter', 'kindFilter', 'ownerFilter']) {
         $(control).addEventListener('input', render);
       }
       $('addBtn').addEventListener('click', () => openForm());
