@@ -151,6 +151,7 @@
         <p id="lastUpdate" class="muted">Aucune URL enregistrée.</p>
       </div>
       <div class="topbar-actions">
+        <button id="relayBtn" class="btn" type="button">Détection des erreurs 500</button>
         <button id="soundBtn" class="btn" type="button">Alerte sonore : activée</button>
         <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
         <button id="exportBtn" class="btn" type="button">Exporter</button>
@@ -162,14 +163,13 @@
     <main>
       <div class="notice" id="notice">
         <button class="btn btn-sm" type="button" id="noticeClose">J'ai compris</button>
-        <strong>Limite importante à connaître</strong>
-        Les tests sont effectués par votre navigateur, qui n'a pas le droit de lire le contenu d'un
-        site tiers. Sur la quasi-totalité des sites, le contrôle est donc <em>limité</em> : il détecte
-        un serveur injoignable, un délai dépassé et une lenteur, mais
-        <strong style="display:inline">une erreur HTTP 500 ou une page d'erreur s'affichera en vert</strong>,
-        car le navigateur voit seulement que le serveur a répondu. Pour détecter les erreurs serveur,
-        il faut la version installée sur un serveur. La surveillance ne tourne par ailleurs que tant
-        que cet onglet reste ouvert.
+        <strong>À faire avant de vous fier aux résultats</strong>
+        Les tests sont effectués par votre navigateur, qui n'a pas le droit de lire la réponse d'un
+        site tiers : par défaut, une erreur HTTP 500 s'affiche donc en vert. Pour détecter les erreurs
+        serveur, ouvrez <strong style="display:inline">Détection des erreurs 500</strong> en haut à
+        droite et activez un relais. La colonne « Contrôle » indique ensuite, pour chaque URL, si le
+        code HTTP a réellement été vérifié. La surveillance ne tourne par ailleurs que tant que cet
+        onglet reste ouvert.
       </div>
 
       <section id="counters" class="counters"></section>
@@ -266,6 +266,34 @@
       </form>
     </dialog>
 
+    <dialog id="relayDialog">
+      <h2>Détection des erreurs 500 et des pages d'erreur</h2>
+      <p class="muted" style="margin-bottom:12px">
+        Un navigateur n'a pas le droit de lire la réponse d'un site tiers : il constate seulement que
+        le serveur a répondu. Pour connaître le code HTTP réel, le test doit passer par un relais.
+      </p>
+      <div class="notice" style="margin-bottom:14px">
+        <strong>À valider avant activation</strong>
+        Une fois activé, l'adresse des URL concernées est transmise à ce service externe, qui effectue
+        le test à votre place. Les tests partent alors de son adresse et non de la vôtre : un
+        back-office filtré par adresse IP deviendra injoignable. N'activez cette option que pour des
+        URL dont la transmission à un prestataire externe est acceptable.
+      </div>
+      <label>
+        Relais utilisé
+        <select id="relaySelect"></select>
+      </label>
+      <p class="muted" style="margin-bottom:12px">
+        Le relais n'est sollicité que si le site refuse la lecture directe. Les URL qui l'autorisent
+        sont toujours testées en direct, sans passer par un tiers.
+      </p>
+      <button id="relayTest" class="btn" type="button">Vérifier que le relais fonctionne</button>
+      <div id="relayResult" class="muted" style="margin-top:10px"></div>
+      <menu>
+        <button class="btn" type="button" data-close>Fermer</button>
+      </menu>
+    </dialog>
+
     <dialog id="detailDialog">
       <div id="detailContent"></div>
       <menu><button class="btn" type="button" data-close>Fermer</button></menu>
@@ -289,7 +317,40 @@
       const JITTER_RATIO = 0.1;
 
       const $ = (id) => document.getElementById(id);
-      const store = { items: [], paused: false, sound: true };
+      const store = { items: [], paused: false, sound: true, relay: '' };
+
+      /**
+       * Relais de contrôle approfondi. Un navigateur n'a pas le droit de lire la réponse
+       * d'un site tiers ; en passant par un relais qui l'y autorise, on récupère le code
+       * HTTP réel et le contenu, donc les erreurs 500 et les pages d'erreur.
+       * Contrepartie : l'URL surveillée transite par ce service externe.
+       */
+      const RELAYS = {
+        allorigins: {
+          label: 'AllOrigins (allorigins.win)',
+          build: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+          async read(response) {
+            const data = await response.json();
+            const code = Number(data?.status?.http_code);
+            if (!Number.isFinite(code) || code <= 0) return null;
+            return { httpStatus: code, body: String(data.contents ?? '') };
+          },
+        },
+        codetabs: {
+          label: 'CodeTabs (api.codetabs.com)',
+          build: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+          async read(response) {
+            return { httpStatus: response.status, body: await response.text() };
+          },
+        },
+        corsproxy: {
+          label: 'CorsProxy (corsproxy.io)',
+          build: (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+          async read(response) {
+            return { httpStatus: response.status, body: await response.text() };
+          },
+        },
+      };
       const inFlightHosts = new Set();
       let inFlight = 0;
 
@@ -316,6 +377,7 @@
           if (Array.isArray(parsed.items)) store.items = parsed.items;
           store.paused = parsed.paused === true;
           store.sound = parsed.sound !== false;
+          store.relay = RELAYS[parsed.relay] ? parsed.relay : '';
         } catch {
           /* Configuration illisible : on repart d'une liste vide plutôt que de bloquer. */
         }
@@ -352,66 +414,95 @@
         return el('span', { class: 'pill', dataset: { status } }, [el('span', { class: 'dot' }), STATUS_LABELS[status] ?? status]);
       }
 
-      /**
-       * Deux niveaux de contrôle. On tente d'abord la lecture complète : si le site
-       * l'autorise, on vérifie le code HTTP et le contenu. Sinon on se rabat sur une
-       * simple vérification de joignabilité, tout ce qu'un navigateur peut garantir.
-       */
-      async function probe(item) {
+      async function fetchWithTimeout(url, options, timeoutMs) {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), item.timeoutMs);
-        let startedAt = performance.now();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-          try {
-            // Une fois la lecture refusée, inutile de la retenter à chaque passage :
-            // cela doublerait le nombre de requêtes envoyées au serveur surveillé.
-            if (item.corsBlocked) throw new Error('lecture déjà refusée');
-            const response = await fetch(item.url, {
-              cache: 'no-store', redirect: 'follow', signal: controller.signal,
-            });
-            const ms = Math.round(performance.now() - startedAt);
-            const problems = [];
-            if (response.status !== item.expectedStatus) {
-              problems.push(`HTTP ${response.status} (attendu ${item.expectedStatus})`);
-            }
-            if (item.keywordExpect || item.keywordForbid) {
-              const body = await response.text();
-              if (item.keywordExpect && !body.includes(item.keywordExpect)) {
-                problems.push(`Texte attendu absent : « ${item.keywordExpect} »`);
-              }
-              if (item.keywordForbid && body.includes(item.keywordForbid)) {
-                problems.push(`Texte d'erreur détecté : « ${item.keywordForbid} »`);
-              }
-            }
-            if (problems.length) {
-              return { status: 'down', ms, depth: 'complet', httpStatus: response.status, error: problems.join(' — ') };
-            }
-            return {
-              status: ms > item.slowMs ? 'slow' : 'ok',
-              ms, depth: 'complet', httpStatus: response.status, error: null,
-            };
-          } catch (corsError) {
-            if (controller.signal.aborted) throw corsError;
-            // Lecture refusée par le site : on retombe sur le contrôle de joignabilité.
-            item.corsBlocked = true;
-            startedAt = performance.now(); // Ne pas compter la tentative refusée dans le temps de réponse.
-            await fetch(item.url, {
-              mode: 'no-cors', cache: 'no-store', signal: controller.signal,
-            });
-            const ms = Math.round(performance.now() - startedAt);
-            return {
-              status: ms > item.slowMs ? 'slow' : 'ok',
-              ms, depth: 'limité', httpStatus: null, error: null,
-            };
-          }
+          return await fetch(url, { cache: 'no-store', ...options, signal: controller.signal });
         } catch (err) {
-          const ms = Math.round(performance.now() - startedAt);
           if (controller.signal.aborted) {
-            return { status: 'down', ms, depth: 'limité', httpStatus: null, error: `Délai dépassé (> ${item.timeoutMs} ms)` };
+            const timeout = new Error(`Délai dépassé (> ${timeoutMs} ms)`);
+            timeout.timedOut = true;
+            throw timeout;
           }
-          return { status: 'down', ms, depth: 'limité', httpStatus: null, error: 'Serveur injoignable (connexion, DNS ou certificat)' };
+          throw err;
         } finally {
           clearTimeout(timer);
+        }
+      }
+
+      const timeoutVerdict = (item) => ({
+        status: 'down', ms: item.timeoutMs, depth: 'limité', httpStatus: null,
+        error: `Délai dépassé (> ${item.timeoutMs} ms)`,
+      });
+
+      /** Verdict commun aux contrôles qui ont pu lire la réponse (direct ou via relais). */
+      function verdict(item, httpStatus, body, ms, depth) {
+        const problems = [];
+        if (httpStatus !== item.expectedStatus) {
+          problems.push(`HTTP ${httpStatus} (attendu ${item.expectedStatus})`);
+        }
+        if (item.keywordExpect && !body.includes(item.keywordExpect)) {
+          problems.push(`Texte attendu absent : « ${item.keywordExpect} »`);
+        }
+        if (item.keywordForbid && body.includes(item.keywordForbid)) {
+          problems.push(`Texte d'erreur détecté : « ${item.keywordForbid} »`);
+        }
+        if (problems.length) {
+          return { status: 'down', ms, depth, httpStatus, error: problems.join(' — ') };
+        }
+        return { status: ms > item.slowMs ? 'slow' : 'ok', ms, depth, httpStatus, error: null };
+      }
+
+      /**
+       * Trois niveaux de contrôle, du plus complet au plus limité. Le relais n'est
+       * sollicité que si le site refuse la lecture directe : les URL qui l'autorisent
+       * ne sortent jamais vers un service tiers.
+       */
+      async function probe(item) {
+        // 1. Lecture directe : gratuite et sans tiers, mais peu de sites l'autorisent.
+        if (!item.corsBlocked) {
+          try {
+            const startedAt = performance.now();
+            const response = await fetchWithTimeout(item.url, { redirect: 'follow' }, item.timeoutMs);
+            const ms = Math.round(performance.now() - startedAt);
+            return verdict(item, response.status, await response.text(), ms, 'complet');
+          } catch (err) {
+            if (err.timedOut) return timeoutVerdict(item);
+            // Peut être un refus de lecture comme une vraie panne : on tranche plus bas.
+            item.corsBlocked = true;
+          }
+        }
+
+        // 2. Relais : seul moyen d'obtenir le code HTTP réel quand la lecture est refusée.
+        const relay = RELAYS[store.relay];
+        if (relay) {
+          try {
+            const startedAt = performance.now();
+            const response = await fetchWithTimeout(relay.build(item.url), {}, item.timeoutMs + 8000);
+            const read = await relay.read(response);
+            const ms = Math.round(performance.now() - startedAt);
+            if (read) return verdict(item, read.httpStatus, read.body, ms, 'relais');
+            // Réponse inexploitable : c'est le relais qui est en cause, pas le site
+            // surveillé. On ne déclenche surtout pas une fausse alerte.
+            return { status: 'unknown', ms, depth: 'relais', httpStatus: null, error: 'Relais indisponible — contrôle approfondi impossible' };
+          } catch (err) {
+            return {
+              status: 'unknown', ms: 0, depth: 'relais', httpStatus: null,
+              error: err.timedOut ? 'Relais trop lent — contrôle approfondi impossible' : 'Relais injoignable — contrôle approfondi impossible',
+            };
+          }
+        }
+
+        // 3. Repli : le navigateur ne peut plus que constater si le serveur répond.
+        try {
+          const startedAt = performance.now();
+          await fetchWithTimeout(item.url, { mode: 'no-cors' }, item.timeoutMs);
+          const ms = Math.round(performance.now() - startedAt);
+          return { status: ms > item.slowMs ? 'slow' : 'ok', ms, depth: 'limité', httpStatus: null, error: null };
+        } catch (err) {
+          if (err.timedOut) return timeoutVerdict(item);
+          return { status: 'down', ms: 0, depth: 'limité', httpStatus: null, error: 'Serveur injoignable (connexion, DNS ou certificat)' };
         }
       }
 
@@ -442,8 +533,10 @@
         try {
           const result = await probe(item);
           const failed = result.status === 'down';
+          const undetermined = result.status === 'unknown';
           const wasDown = item.status === 'down';
-          item.failures = failed ? (item.failures ?? 0) + 1 : 0;
+          // Un contrôle indéterminé ne prouve rien : on ne compte ni succès ni échec.
+          if (!undetermined) item.failures = failed ? (item.failures ?? 0) + 1 : 0;
           // Un incident réseau isolé ne doit pas faire passer un projet en rouge.
           item.status = failed ? (item.failures >= FAILURE_THRESHOLD ? 'down' : 'degraded') : result.status;
           item.lastMs = result.ms;
@@ -451,7 +544,7 @@
           item.httpStatus = result.httpStatus;
           item.lastError = result.error;
           item.lastCheck = new Date().toISOString();
-          if (!failed) item.lastOk = item.lastCheck;
+          if (!failed && !undetermined) item.lastOk = item.lastCheck;
           item.history = [
             { at: item.lastCheck, status: result.status, ms: result.ms, error: result.error, httpStatus: result.httpStatus },
             ...(item.history ?? []),
@@ -488,7 +581,7 @@
         if (item.status === 'slow') return `Réponse au-delà du seuil de ${item.slowMs} ms`;
         if (!item.lastCheck) return 'En attente du premier test';
         if (item.depth === 'limité') return 'Serveur joignable — code HTTP non vérifiable';
-        return item.httpStatus ? `HTTP ${item.httpStatus}` : 'Aucun problème détecté';
+        return item.httpStatus ? `HTTP ${item.httpStatus} vérifié` : 'Aucun problème détecté';
       }
 
       const effectiveStatus = (item) => (item.enabled ? (item.status ?? 'unknown') : 'paused');
@@ -706,6 +799,66 @@
         render();
         $('formDialog').close();
         tick();
+      });
+
+      $('relaySelect').replaceChildren(
+        el('option', { value: '', textContent: 'Désactivé — pas de détection des erreurs 500' }),
+        ...Object.entries(RELAYS).map(([key, relay]) => el('option', { value: key, textContent: relay.label })),
+      );
+
+      $('relayBtn').addEventListener('click', () => {
+        $('relaySelect').value = store.relay;
+        $('relayResult').textContent = '';
+        $('relayDialog').showModal();
+      });
+
+      $('relaySelect').addEventListener('change', (event) => {
+        store.relay = event.target.value;
+        // Les URL doivent être retestées avec la nouvelle profondeur de contrôle.
+        for (const item of store.items) item.nextCheck = 0;
+        save();
+        render();
+        $('relayResult').textContent = '';
+      });
+
+      /**
+       * Vérification réelle du relais : on teste une page qui répond 200 et une page
+       * qui répond 404, afin de confirmer qu'il transmet bien les codes d'erreur.
+       */
+      $('relayTest').addEventListener('click', async () => {
+        const relay = RELAYS[$('relaySelect').value];
+        const result = $('relayResult');
+        if (!relay) {
+          result.textContent = 'Sélectionnez d’abord un relais.';
+          return;
+        }
+        result.textContent = 'Vérification en cours…';
+        const probes = [
+          { url: 'https://example.com/', expected: 200, label: 'page valide' },
+          { url: 'https://example.com/page-inexistante-supervision', expected: 404, label: 'page en erreur' },
+        ];
+        const lines = [];
+        for (const { url, expected, label } of probes) {
+          try {
+            const response = await fetchWithTimeout(relay.build(url), {}, 20000);
+            const read = await relay.read(response);
+            if (!read) lines.push(`✗ ${label} : réponse du relais inexploitable`);
+            else if (read.httpStatus === expected) lines.push(`✓ ${label} : code ${read.httpStatus} correctement transmis`);
+            else lines.push(`✗ ${label} : code ${read.httpStatus} reçu au lieu de ${expected}`);
+          } catch (err) {
+            lines.push(`✗ ${label} : relais injoignable (${err.timedOut ? 'trop lent' : 'échec réseau'})`);
+          }
+        }
+        const ok = lines.every((line) => line.startsWith('✓'));
+        result.replaceChildren(
+          ...lines.map((line) => el('div', { textContent: line })),
+          el('div', {
+            style: 'margin-top:8px;font-weight:600',
+            textContent: ok
+              ? 'Relais opérationnel : les erreurs 500 seront détectées.'
+              : 'Relais inutilisable en l’état. Essayez-en un autre dans la liste.',
+          }),
+        );
       });
 
       $('soundBtn').addEventListener('click', () => {
