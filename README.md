@@ -72,6 +72,25 @@ npm start
 
 Jeu de données de démonstration (facultatif) : `npm run seed`
 
+## Version autonome : `supervision.html`
+
+Fichier unique à ouvrir par double-clic, sans installation ni serveur. Les tests sont exécutés
+par le navigateur, tant que l'onglet reste ouvert.
+
+- Saisie d'un projet en une fois : front, back-office et chef de projet en charge
+- Tri par gravité puis priorité, filtres par statut, priorité, type et chef de projet
+- Alerte sonore et nombre d'anomalies repris dans le titre de l'onglet
+- Rapport mensuel de disponibilité et journal des incidents horodaté, exportables en CSV
+- Sauvegarde et restauration complètes (configuration, historique, incidents) en un fichier JSON
+
+Limite propre au navigateur : il n'a pas le droit de lire la réponse d'un site tiers, donc une
+erreur HTTP 500 passe inaperçue par défaut. Le bouton « Détection des erreurs 500 » permet
+d'activer un relais qui lève cette limite, au prix de la transmission des URL surveillées à un
+service externe. Un bouton vérifie sur place que le relais retransmet bien les codes d'erreur.
+
+L'historique est conservé dans IndexedDB : mesures brutes sur 30 jours, agrégats quotidiens et
+incidents sans limite de durée.
+
 ## Comment tester l'outil
 
 Un faux serveur est fourni : il reproduit toutes les pannes que l'outil doit détecter, **sans

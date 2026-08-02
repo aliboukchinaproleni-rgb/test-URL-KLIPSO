@@ -142,6 +142,21 @@
       .detail-grid strong { font-size: 15px; }
       .history { max-height: 230px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
       .history table { min-width: 0; }
+      dialog.wide { width: min(1150px, 96vw); }
+      .report-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 14px; }
+      .report-controls input { width: auto; }
+      .report-section { margin-bottom: 18px; }
+      .report-section h3 { font-size: 13px; margin: 0 0 8px; }
+      .report-table { border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 300px; }
+      .report-table table { min-width: 720px; }
+      .uptime-bad { color: var(--down); font-weight: 700; }
+      .uptime-warn { color: var(--slow); font-weight: 700; }
+      .uptime-good { color: var(--ok); font-weight: 600; }
+      @media print {
+        .topbar, .filters, .counters, .report-controls, dialog menu, .notice { display: none !important; }
+        dialog { position: static; border: none; width: auto; }
+        .report-table { max-height: none; }
+      }
     </style>
   </head>
   <body>
@@ -151,6 +166,7 @@
         <p id="lastUpdate" class="muted">Aucune URL enregistrée.</p>
       </div>
       <div class="topbar-actions">
+        <button id="reportBtn" class="btn" type="button">Rapport mensuel</button>
         <button id="relayBtn" class="btn" type="button">Détection des erreurs 500</button>
         <button id="soundBtn" class="btn" type="button">Alerte sonore : activée</button>
         <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
@@ -288,6 +304,18 @@
       </form>
     </dialog>
 
+    <dialog id="reportDialog" class="wide">
+      <h2>Rapport de disponibilité</h2>
+      <div class="report-controls">
+        <label style="margin:0">Mois<input id="reportMonth" type="month" /></label>
+        <button id="reportCsvUptime" class="btn" type="button">Exporter la disponibilité (CSV)</button>
+        <button id="reportCsvIncidents" class="btn" type="button">Exporter les incidents (CSV)</button>
+        <button id="reportPrint" class="btn" type="button">Imprimer / PDF</button>
+      </div>
+      <div id="reportContent"></div>
+      <menu><button class="btn" type="button" data-close>Fermer</button></menu>
+    </dialog>
+
     <dialog id="relayDialog">
       <h2>Détection des erreurs 500 et des pages d'erreur</h2>
       <p class="muted" style="margin-bottom:12px">
@@ -337,6 +365,58 @@
       const MAX_CONCURRENT = 4;
       const HISTORY_LIMIT = 40;
       const JITTER_RATIO = 0.1;
+
+      /**
+       * Historique durable. localStorage est trop petit (environ 5 Mo) pour conserver
+       * des mois de mesures : on utilise IndexedDB, qui offre plusieurs centaines de Mo
+       * dans le même navigateur, sans rien installer.
+       *
+       *  - checks    : mesures brutes, purgées au-delà de RAW_RETENTION_DAYS
+       *  - days      : un agrégat par URL et par jour, conservé sans limite de durée
+       *  - incidents : une ligne par panne, avec début, fin et cause — c'est la pièce
+       *                justificative opposable à un client
+       */
+      const DB_NAME = 'supervision-historique';
+      const RAW_RETENTION_DAYS = 30;
+      let dbPromise = null;
+
+      function openDb() {
+        if (dbPromise) return dbPromise;
+        dbPromise = new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB_NAME, 1);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains('checks')) {
+              db.createObjectStore('checks', { keyPath: 'id', autoIncrement: true }).createIndex('at', 'at');
+            }
+            if (!db.objectStoreNames.contains('days')) {
+              db.createObjectStore('days', { keyPath: 'key' });
+            }
+            if (!db.objectStoreNames.contains('incidents')) {
+              db.createObjectStore('incidents', { keyPath: 'id', autoIncrement: true })
+                .createIndex('startedAt', 'startedAt');
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        return dbPromise;
+      }
+
+      function tx(storeName, mode, run) {
+        return openDb().then(
+          (db) =>
+            new Promise((resolve, reject) => {
+              const transaction = db.transaction(storeName, mode);
+              const result = run(transaction.objectStore(storeName));
+              transaction.oncomplete = () => resolve(result?.result ?? result);
+              transaction.onerror = () => reject(transaction.error);
+            }),
+        );
+      }
+
+      const dbGetAll = (storeName) => tx(storeName, 'readonly', (store) => store.getAll());
+      const dayKey = (urlId, iso) => `${urlId}|${iso.slice(0, 10)}`;
 
       const $ = (id) => document.getElementById(id);
       const store = { items: [], paused: false, sound: true, relay: '' };
@@ -548,6 +628,76 @@
         }
       }
 
+      /** Consigne durablement une mesure, met à jour l'agrégat du jour et le journal des pannes. */
+      async function archive(item, result, at, confirmedStatus) {
+        try {
+          await tx('checks', 'readwrite', (store) =>
+            store.add({ urlId: item.id, at, status: result.status, ms: result.ms, httpStatus: result.httpStatus, error: result.error }),
+          );
+
+          const key = dayKey(item.id, at);
+          await tx('days', 'readwrite', (store) => {
+            const read = store.get(key);
+            read.onsuccess = () => {
+              const day = read.result ?? {
+                key, urlId: item.id, day: at.slice(0, 10),
+                checks: 0, failures: 0, slow: 0, undetermined: 0, sumMs: 0, maxMs: 0,
+              };
+              day.checks += 1;
+              if (result.status === 'down') day.failures += 1;
+              if (result.status === 'slow') day.slow += 1;
+              if (result.status === 'unknown') day.undetermined += 1;
+              day.sumMs += result.ms ?? 0;
+              day.maxMs = Math.max(day.maxMs, result.ms ?? 0);
+              store.put(day);
+            };
+          });
+
+          if (confirmedStatus === 'down' && !item.incidentId) {
+            // La panne a commencé au premier échec, pas à sa confirmation :
+            // c'est cette date qui fait foi vis-à-vis du client.
+            const startedAt = item.firstFailureAt ?? at;
+            const id = await tx('incidents', 'readwrite', (store) =>
+              store.add({
+                urlId: item.id, project: item.project, client: item.client, owner: item.owner,
+                label: item.label, url: item.url, kind: item.kind, priority: item.priority,
+                startedAt, endedAt: null, cause: result.error, detectedAt: at,
+              }),
+            );
+            item.incidentId = id;
+          } else if (result.status !== 'down' && result.status !== 'unknown' && item.incidentId) {
+            const incidentId = item.incidentId;
+            item.incidentId = null;
+            await tx('incidents', 'readwrite', (store) => {
+              const read = store.get(incidentId);
+              read.onsuccess = () => {
+                if (!read.result) return;
+                store.put({ ...read.result, endedAt: at });
+              };
+            });
+          }
+        } catch (err) {
+          console.warn("Historique non enregistré", err);
+        }
+      }
+
+      /** Purge des mesures brutes anciennes ; les agrégats et incidents sont conservés. */
+      async function pruneRawChecks() {
+        const limit = new Date(Date.now() - RAW_RETENTION_DAYS * 86400000).toISOString();
+        try {
+          await tx('checks', 'readwrite', (store) => {
+            const cursor = store.index('at').openCursor(IDBKeyRange.upperBound(limit));
+            cursor.onsuccess = () => {
+              if (!cursor.result) return;
+              cursor.result.delete();
+              cursor.result.continue();
+            };
+          });
+        } catch (err) {
+          console.warn('Purge impossible', err);
+        }
+      }
+
       async function checkItem(item) {
         const host = hostOf(item.url);
         inFlightHosts.add(host);
@@ -557,16 +707,24 @@
           const failed = result.status === 'down';
           const undetermined = result.status === 'unknown';
           const wasDown = item.status === 'down';
+          const at = new Date().toISOString();
           // Un contrôle indéterminé ne prouve rien : on ne compte ni succès ni échec.
-          if (!undetermined) item.failures = failed ? (item.failures ?? 0) + 1 : 0;
+          if (!undetermined) {
+            if (failed && !item.failures) item.firstFailureAt = at;
+            if (!failed) item.firstFailureAt = null;
+            item.failures = failed ? (item.failures ?? 0) + 1 : 0;
+          }
           // Un incident réseau isolé ne doit pas faire passer un projet en rouge.
           item.status = failed ? (item.failures >= FAILURE_THRESHOLD ? 'down' : 'degraded') : result.status;
           item.lastMs = result.ms;
           item.depth = result.depth;
           item.httpStatus = result.httpStatus;
           item.lastError = result.error;
-          item.lastCheck = new Date().toISOString();
-          if (!failed && !undetermined) item.lastOk = item.lastCheck;
+          item.lastCheck = at;
+          if (!failed && !undetermined) item.lastOk = at;
+          // L'incident ne s'ouvre qu'une fois la panne confirmée, mais il sera daté
+          // du premier échec constaté.
+          await archive(item, result, at, item.status);
           item.history = [
             { at: item.lastCheck, status: result.status, ms: result.ms, error: result.error, httpStatus: result.httpStatus },
             ...(item.history ?? []),
@@ -876,6 +1034,230 @@
         tick();
       });
 
+      function formatDuration(ms) {
+        if (ms <= 0) return '—';
+        const minutes = Math.round(ms / 60000);
+        if (minutes < 60) return `${minutes} min`;
+        const hours = Math.floor(minutes / 60);
+        const rest = minutes % 60;
+        if (hours < 24) return rest ? `${hours} h ${rest} min` : `${hours} h`;
+        return `${Math.floor(hours / 24)} j ${hours % 24} h`;
+      }
+
+      function uptimeClass(percent) {
+        if (percent < 99) return 'uptime-bad';
+        if (percent < 99.9) return 'uptime-warn';
+        return 'uptime-good';
+      }
+
+      let reportCache = { rows: [], incidents: [], label: '' };
+
+      async function buildReport() {
+        const month = $('reportMonth').value || new Date().toISOString().slice(0, 7);
+        const start = new Date(`${month}-01T00:00:00`);
+        const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+        const now = Date.now();
+        const [days, incidents] = await Promise.all([dbGetAll('days'), dbGetAll('incidents')]);
+
+        const monthIncidents = incidents
+          .filter((incident) => {
+            const from = new Date(incident.startedAt).getTime();
+            const to = incident.endedAt ? new Date(incident.endedAt).getTime() : now;
+            return from < end.getTime() && to > start.getTime();
+          })
+          .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+
+        // Durée d'indisponibilité rapportée au mois demandé : une panne à cheval
+        // sur deux mois n'est comptée que pour la part qui tombe dans celui-ci.
+        const downtimeByUrl = new Map();
+        for (const incident of monthIncidents) {
+          const from = Math.max(new Date(incident.startedAt).getTime(), start.getTime());
+          const to = Math.min(incident.endedAt ? new Date(incident.endedAt).getTime() : now, end.getTime());
+          downtimeByUrl.set(incident.urlId, (downtimeByUrl.get(incident.urlId) ?? 0) + Math.max(0, to - from));
+        }
+
+        const totals = new Map();
+        for (const day of days) {
+          if (!day.day.startsWith(month)) continue;
+          const entry = totals.get(day.urlId) ?? { checks: 0, failures: 0, slow: 0, sumMs: 0, maxMs: 0 };
+          entry.checks += day.checks;
+          entry.failures += day.failures;
+          entry.slow += day.slow;
+          entry.sumMs += day.sumMs;
+          entry.maxMs = Math.max(entry.maxMs, day.maxMs);
+          totals.set(day.urlId, entry);
+        }
+
+        // Une URL supprimée depuis doit rester dans l'historique : on retrouve son
+        // identité via le dernier incident connu.
+        const identity = new Map(store.items.map((item) => [item.id, item]));
+        for (const incident of incidents) {
+          if (!identity.has(incident.urlId)) identity.set(incident.urlId, incident);
+        }
+
+        const rows = [...new Set([...totals.keys(), ...downtimeByUrl.keys()])]
+          .map((urlId) => {
+            const info = identity.get(urlId) ?? { project: '(URL supprimée)', label: urlId, url: '' };
+            const stats = totals.get(urlId) ?? { checks: 0, failures: 0, slow: 0, sumMs: 0, maxMs: 0 };
+            const uptime = stats.checks ? ((stats.checks - stats.failures) / stats.checks) * 100 : null;
+            return {
+              project: info.project ?? '', client: info.client ?? '', owner: info.owner ?? '',
+              label: info.label ?? '', url: info.url ?? '',
+              kind: info.kind === 'back' ? 'Back-office' : 'Front',
+              priority: info.priority ?? '',
+              checks: stats.checks, failures: stats.failures, slow: stats.slow,
+              uptime, avgMs: stats.checks ? Math.round(stats.sumMs / stats.checks) : null, maxMs: stats.maxMs,
+              downtimeMs: downtimeByUrl.get(urlId) ?? 0,
+              incidents: monthIncidents.filter((incident) => incident.urlId === urlId).length,
+            };
+          })
+          .sort((a, b) => b.downtimeMs - a.downtimeMs || (a.uptime ?? 100) - (b.uptime ?? 100));
+
+        reportCache = {
+          rows, incidents: monthIncidents,
+          label: start.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
+        };
+        renderReport();
+      }
+
+      function renderReport() {
+        const { rows, incidents, label } = reportCache;
+        const totalChecks = rows.reduce((sum, row) => sum + row.checks, 0);
+        const totalFailures = rows.reduce((sum, row) => sum + row.failures, 0);
+        const globalUptime = totalChecks ? ((totalChecks - totalFailures) / totalChecks) * 100 : null;
+        const totalDowntime = rows.reduce((sum, row) => sum + row.downtimeMs, 0);
+
+        $('reportContent').replaceChildren(
+          el('div', { class: 'detail-grid' }, [
+            el('div', {}, [el('span', { textContent: 'Période' }), el('strong', { textContent: label })]),
+            el('div', {}, [el('span', { textContent: 'URL suivies' }), el('strong', { textContent: String(rows.length) })]),
+            el('div', {}, [el('span', { textContent: 'Tests effectués' }), el('strong', { textContent: totalChecks.toLocaleString('fr-FR') })]),
+            el('div', {}, [
+              el('span', { textContent: 'Disponibilité globale' }),
+              el('strong', {
+                class: globalUptime === null ? '' : uptimeClass(globalUptime),
+                textContent: globalUptime === null ? '—' : `${globalUptime.toFixed(2)} %`,
+              }),
+            ]),
+            el('div', {}, [el('span', { textContent: 'Incidents' }), el('strong', { textContent: String(incidents.length) })]),
+            el('div', {}, [el('span', { textContent: 'Indisponibilité cumulée' }), el('strong', { textContent: formatDuration(totalDowntime) })]),
+          ]),
+
+          el('div', { class: 'report-section' }, [
+            el('h3', { textContent: 'Disponibilité par URL' }),
+            rows.length
+              ? el('div', { class: 'report-table' }, [
+                  el('table', {}, [
+                    el('thead', {}, el('tr', {}, ['Projet', 'Chef de projet', 'Type', 'URL', 'Tests', 'Échecs', 'Dispo.', 'Indispo.', 'Incidents', 'Moyen', 'Pic']
+                      .map((header) => el('th', { textContent: header })))),
+                    el('tbody', {}, rows.map((row) =>
+                      el('tr', {}, [
+                        el('td', {}, [el('div', { textContent: row.project }), el('small', { class: 'muted', textContent: row.client })]),
+                        el('td', { textContent: row.owner }),
+                        el('td', { textContent: row.kind }),
+                        el('td', { class: 'url-cell', textContent: row.label || row.url }),
+                        el('td', { textContent: String(row.checks) }),
+                        el('td', { textContent: String(row.failures) }),
+                        el('td', {}, el('span', {
+                          class: row.uptime === null ? '' : uptimeClass(row.uptime),
+                          textContent: row.uptime === null ? '—' : `${row.uptime.toFixed(2)} %`,
+                        })),
+                        el('td', { textContent: formatDuration(row.downtimeMs) }),
+                        el('td', { textContent: String(row.incidents) }),
+                        el('td', { textContent: row.avgMs === null ? '—' : `${row.avgMs} ms` }),
+                        el('td', { textContent: row.maxMs ? `${row.maxMs} ms` : '—' }),
+                      ]),
+                    )),
+                  ]),
+                ])
+              : el('p', { class: 'muted', textContent: 'Aucune mesure enregistrée sur ce mois.' }),
+          ]),
+
+          el('div', { class: 'report-section' }, [
+            el('h3', { textContent: `Journal des incidents (${incidents.length})` }),
+            incidents.length
+              ? el('div', { class: 'report-table' }, [
+                  el('table', {}, [
+                    el('thead', {}, el('tr', {}, ['Projet', 'URL', 'Début', 'Fin', 'Durée', 'Cause']
+                      .map((header) => el('th', { textContent: header })))),
+                    el('tbody', {}, incidents.map((incident) => {
+                      const from = new Date(incident.startedAt).getTime();
+                      const to = incident.endedAt ? new Date(incident.endedAt).getTime() : Date.now();
+                      return el('tr', {}, [
+                        el('td', {}, [
+                          el('div', { textContent: incident.project }),
+                          el('small', { class: 'muted', textContent: [incident.client, incident.owner].filter(Boolean).join(' — ') }),
+                        ]),
+                        el('td', { class: 'url-cell', textContent: `${incident.kind === 'back' ? 'Back-office' : 'Front'} — ${incident.label || incident.url}` }),
+                        el('td', { textContent: formatDateTime(incident.startedAt) }),
+                        el('td', {}, incident.endedAt
+                          ? document.createTextNode(formatDateTime(incident.endedAt))
+                          : el('strong', { class: 'uptime-bad', textContent: 'en cours' })),
+                        el('td', { textContent: formatDuration(to - from) }),
+                        el('td', { class: 'detail-cell', textContent: incident.cause ?? '' }),
+                      ]);
+                    })),
+                  ]),
+                ])
+              : el('p', { class: 'muted', textContent: 'Aucun incident sur la période. ' }),
+          ]),
+        );
+      }
+
+      function downloadCsv(filename, rows) {
+        // Séparateur point-virgule et BOM : Excel en configuration française ouvre
+        // le fichier directement, sans assistant d'importation.
+        const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+        const csv = rows.map((row) => row.map(escape).join(';')).join('\r\n');
+        const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+        const link = el('a', { href: url, download: filename });
+        document.body.append(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      $('reportBtn').addEventListener('click', async () => {
+        if (!$('reportMonth').value) $('reportMonth').value = new Date().toISOString().slice(0, 7);
+        $('reportContent').textContent = 'Calcul en cours…';
+        $('reportDialog').showModal();
+        await buildReport();
+      });
+
+      $('reportMonth').addEventListener('change', buildReport);
+      $('reportPrint').addEventListener('click', () => window.print());
+
+      $('reportCsvUptime').addEventListener('click', () => {
+        const month = $('reportMonth').value;
+        downloadCsv(`disponibilite-${month}.csv`, [
+          ['Projet', 'Client', 'Chef de projet', 'Type', 'Libellé', 'URL', 'Priorité',
+            'Tests', 'Échecs', 'Disponibilité %', 'Indisponibilité (min)', 'Incidents', 'Temps moyen (ms)', 'Pic (ms)'],
+          ...reportCache.rows.map((row) => [
+            row.project, row.client, row.owner, row.kind, row.label, row.url, row.priority,
+            row.checks, row.failures, row.uptime === null ? '' : row.uptime.toFixed(2).replace('.', ','),
+            Math.round(row.downtimeMs / 60000), row.incidents, row.avgMs ?? '', row.maxMs || '',
+          ]),
+        ]);
+      });
+
+      $('reportCsvIncidents').addEventListener('click', () => {
+        const month = $('reportMonth').value;
+        downloadCsv(`incidents-${month}.csv`, [
+          ['Projet', 'Client', 'Chef de projet', 'Type', 'Libellé', 'URL', 'Priorité',
+            'Début', 'Fin', 'Durée (min)', 'Cause'],
+          ...reportCache.incidents.map((incident) => {
+            const from = new Date(incident.startedAt).getTime();
+            const to = incident.endedAt ? new Date(incident.endedAt).getTime() : Date.now();
+            return [
+              incident.project, incident.client, incident.owner,
+              incident.kind === 'back' ? 'Back-office' : 'Front', incident.label, incident.url, incident.priority,
+              formatDateTime(incident.startedAt), incident.endedAt ? formatDateTime(incident.endedAt) : 'en cours',
+              Math.round((to - from) / 60000), incident.cause ?? '',
+            ];
+          }),
+        ]);
+      });
+
       $('relaySelect').replaceChildren(
         el('option', { value: '', textContent: 'Désactivé — pas de détection des erreurs 500' }),
         ...Object.entries(RELAYS).map(([key, relay]) => el('option', { value: key, textContent: relay.label })),
@@ -949,13 +1331,17 @@
         render();
       });
 
-      $('exportBtn').addEventListener('click', () => {
+      $('exportBtn').addEventListener('click', async () => {
+        // La sauvegarde emporte l'historique et les incidents : sans cela, vider le
+        // navigateur ferait disparaître les preuves d'indisponibilité.
+        const [days, incidents] = await Promise.all([dbGetAll('days'), dbGetAll('incidents')]).catch(() => [[], []]);
         const payload = {
           exportedAt: new Date().toISOString(),
           items: store.items.map(({ history, ...rest }) => rest),
+          days, incidents,
         };
         const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
-        const link = el('a', { href: url, download: 'supervision-urls.json' });
+        const link = el('a', { href: url, download: `supervision-sauvegarde-${new Date().toISOString().slice(0, 10)}.json` });
         document.body.append(link);
         link.click();
         link.remove();
@@ -979,9 +1365,30 @@
               status: 'unknown', failures: 0, history: [], nextCheck: 0,
             })),
           );
+          // Restauration de l'historique : les agrégats sont remplacés à l'identique,
+          // les incidents ne sont ajoutés que s'ils sont absents.
+          let restoredDays = 0;
+          let restoredIncidents = 0;
+          if (Array.isArray(parsed.days) && parsed.days.length) {
+            await tx('days', 'readwrite', (store) => {
+              for (const day of parsed.days) store.put(day);
+            });
+            restoredDays = parsed.days.length;
+          }
+          if (Array.isArray(parsed.incidents) && parsed.incidents.length) {
+            const existing = new Set((await dbGetAll('incidents')).map((inc) => `${inc.urlId}|${inc.startedAt}`));
+            const missing = parsed.incidents.filter((inc) => !existing.has(`${inc.urlId}|${inc.startedAt}`));
+            await tx('incidents', 'readwrite', (store) => {
+              for (const { id, ...incident } of missing) store.add(incident);
+            });
+            restoredIncidents = missing.length;
+          }
           save();
           render();
-          alert(`${added.length} URL importée(s).`);
+          alert(
+            `${added.length} URL importée(s).\n` +
+              `${restoredDays} journée(s) d'historique et ${restoredIncidents} incident(s) restaurés.`,
+          );
         } catch {
           alert("Fichier illisible : sélectionnez un export généré par cet outil.");
         }
@@ -1007,6 +1414,7 @@
       setInterval(tick, 5000);
       setInterval(render, 20000);
       tick();
+      pruneRawChecks();
     </script>
   </body>
 </html>
