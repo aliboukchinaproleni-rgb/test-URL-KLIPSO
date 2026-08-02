@@ -168,6 +168,7 @@
       <div class="topbar-actions">
         <button id="reportBtn" class="btn" type="button">Rapport mensuel</button>
         <button id="relayBtn" class="btn" type="button">Détection des erreurs 500</button>
+        <button id="notifyBtn" class="btn" type="button" hidden>Notifications</button>
         <button id="soundBtn" class="btn" type="button">Alerte sonore : activée</button>
         <button id="pauseBtn" class="btn" type="button">Mettre en pause</button>
         <button id="exportBtn" class="btn" type="button">Exporter</button>
@@ -177,6 +178,13 @@
     </header>
 
     <main>
+      <div class="notice" id="lockNotice" hidden>
+        <strong>Surveillance assurée par un autre onglet</strong>
+        Cet onglet affiche les résultats sans effectuer de test, afin de ne pas doubler les
+        requêtes envoyées aux serveurs. Il prendra le relais automatiquement si l'autre onglet
+        est fermé.
+      </div>
+
       <div class="notice" id="notice">
         <button class="btn btn-sm" type="button" id="noticeClose">J'ai compris</button>
         <strong>À faire avant de vous fier aux résultats</strong>
@@ -355,6 +363,8 @@
       'use strict';
 
       const STORAGE_KEY = 'supervision-url-projets-v1';
+      const HEARTBEAT_KEY = `${STORAGE_KEY}-heartbeat`;
+      const LOCK_KEY = `${STORAGE_KEY}-lock`;
       const STATUS_LABELS = {
         ok: 'Opérationnel', slow: 'Lent', degraded: 'Instable',
         down: 'En panne', paused: 'En pause', unknown: 'En attente',
@@ -365,6 +375,15 @@
       const MAX_CONCURRENT = 4;
       const HISTORY_LIMIT = 40;
       const JITTER_RATIO = 0.1;
+      const CORS_RETRY_MS = 86400000;
+      const CORS_RETRY_CHECKS = 50;
+      const HEARTBEAT_MS = 60000;
+      const GAP_THRESHOLD_MS = 600000;
+      const LOCK_STALE_MS = 30000;
+      const TAB_ID = `t${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
+
+      const canRetryDirect = (item) =>
+        (item.corsRetryAt ?? 0) <= Date.now() || (item.checksSinceCors ?? 0) >= CORS_RETRY_CHECKS;
 
       /**
        * Historique durable. localStorage est trop petit (environ 5 Mo) pour conserver
@@ -383,18 +402,27 @@
       function openDb() {
         if (dbPromise) return dbPromise;
         dbPromise = new Promise((resolve, reject) => {
-          const request = indexedDB.open(DB_NAME, 1);
+          const request = indexedDB.open(DB_NAME, 2);
           request.onupgradeneeded = () => {
             const db = request.result;
-            if (!db.objectStoreNames.contains('checks')) {
-              db.createObjectStore('checks', { keyPath: 'id', autoIncrement: true }).createIndex('at', 'at');
-            }
+            const checks = db.objectStoreNames.contains('checks')
+              ? request.transaction.objectStore('checks')
+              : db.createObjectStore('checks', { keyPath: 'id', autoIncrement: true });
+            if (!checks.indexNames.contains('at')) checks.createIndex('at', 'at');
+            // Sans cet index, relire l'historique d'une URL obligerait à parcourir
+            // l'intégralité des mesures de toutes les URL.
+            if (!checks.indexNames.contains('urlId')) checks.createIndex('urlId', 'urlId');
             if (!db.objectStoreNames.contains('days')) {
               db.createObjectStore('days', { keyPath: 'key' });
             }
             if (!db.objectStoreNames.contains('incidents')) {
               db.createObjectStore('incidents', { keyPath: 'id', autoIncrement: true })
                 .createIndex('startedAt', 'startedAt');
+            }
+            // Périodes pendant lesquelles l'onglet était fermé : aucune mesure n'a été
+            // prise, ce qui n'est ni une disponibilité ni une panne.
+            if (!db.objectStoreNames.contains('gaps')) {
+              db.createObjectStore('gaps', { keyPath: 'id', autoIncrement: true });
             }
           };
           request.onsuccess = () => resolve(request.result);
@@ -416,7 +444,12 @@
       }
 
       const dbGetAll = (storeName) => tx(storeName, 'readonly', (store) => store.getAll());
-      const dayKey = (urlId, iso) => `${urlId}|${iso.slice(0, 10)}`;
+      /** Jour civil local : à Tunis, un test de 23 h 30 doit compter pour le jour même. */
+      function localDay(iso) {
+        const date = new Date(iso);
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      }
+      const dayKey = (urlId, iso) => `${urlId}|${localDay(iso)}`;
 
       const $ = (id) => document.getElementById(id);
       const store = { items: [], paused: false, sound: true, relay: '' };
@@ -563,17 +596,24 @@
        */
       async function probe(item) {
         // 1. Lecture directe : gratuite et sans tiers, mais peu de sites l'autorisent.
-        if (!item.corsBlocked) {
+        // Un échec peut aussi bien venir d'un refus de lecture que d'une panne réelle :
+        // on réessaie donc périodiquement plutôt que de renoncer définitivement.
+        if (!item.corsBlocked || canRetryDirect(item)) {
           try {
             const startedAt = performance.now();
             const response = await fetchWithTimeout(item.url, { redirect: 'follow' }, item.timeoutMs);
             const ms = Math.round(performance.now() - startedAt);
+            item.corsBlocked = false;
+            item.checksSinceCors = 0;
             return verdict(item, response.status, await response.text(), ms, 'complet');
           } catch (err) {
             if (err.timedOut) return timeoutVerdict(item);
-            // Peut être un refus de lecture comme une vraie panne : on tranche plus bas.
             item.corsBlocked = true;
+            item.corsRetryAt = Date.now() + CORS_RETRY_MS;
+            item.checksSinceCors = 0;
           }
+        } else {
+          item.checksSinceCors = (item.checksSinceCors ?? 0) + 1;
         }
 
         // 2. Relais : seul moyen d'obtenir le code HTTP réel quand la lecture est refusée.
@@ -640,7 +680,7 @@
             const read = store.get(key);
             read.onsuccess = () => {
               const day = read.result ?? {
-                key, urlId: item.id, day: at.slice(0, 10),
+                key, urlId: item.id, day: localDay(at),
                 checks: 0, failures: 0, slow: 0, undetermined: 0, sumMs: 0, maxMs: 0,
               };
               day.checks += 1;
@@ -681,6 +721,59 @@
         }
       }
 
+      /** Referme un incident resté ouvert, en datant la fin de ce qui a été réellement observé. */
+      async function closeIncident(incidentId, endedAt, suffix) {
+        if (!incidentId) return;
+        await tx('incidents', 'readwrite', (store) => {
+          const read = store.get(incidentId);
+          read.onsuccess = () => {
+            if (!read.result || read.result.endedAt) return;
+            store.put({ ...read.result, endedAt, cause: `${read.result.cause ?? ''}${suffix}` });
+          };
+        });
+      }
+
+      /**
+       * Reprise après une interruption de surveillance. Un onglet fermé ne mesure rien :
+       * la période doit être déclarée comme non observée, et surtout pas comptée comme
+       * une panne continue ni comme une disponibilité.
+       */
+      async function recoverFromGap() {
+        const raw = localStorage.getItem(HEARTBEAT_KEY);
+        const last = raw ? Number(raw) : 0;
+        const now = Date.now();
+        if (!last || now - last <= GAP_THRESHOLD_MS) return;
+        const from = new Date(last).toISOString();
+        const to = new Date(now).toISOString();
+        try {
+          await tx('gaps', 'readwrite', (store) => store.add({ from, to }));
+          const open = (await dbGetAll('incidents')).filter((incident) => !incident.endedAt);
+          for (const incident of open) {
+            await closeIncident(incident.id, from, ' — observation interrompue');
+          }
+          for (const item of store.items) {
+            if (item.incidentId) item.incidentId = null;
+          }
+          save();
+        } catch (err) {
+          console.warn('Reprise après interruption impossible', err);
+        }
+      }
+
+      /** Un seul onglet effectue les tests, pour ne pas multiplier les requêtes. */
+      function holdsLock() {
+        let lock = null;
+        try {
+          lock = JSON.parse(localStorage.getItem(LOCK_KEY) ?? 'null');
+        } catch {
+          lock = null;
+        }
+        const now = Date.now();
+        if (lock && lock.id !== TAB_ID && now - lock.ts < LOCK_STALE_MS) return false;
+        localStorage.setItem(LOCK_KEY, JSON.stringify({ id: TAB_ID, ts: now }));
+        return true;
+      }
+
       /** Purge des mesures brutes anciennes ; les agrégats et incidents sont conservés. */
       async function pruneRawChecks() {
         const limit = new Date(Date.now() - RAW_RETENTION_DAYS * 86400000).toISOString();
@@ -698,11 +791,53 @@
         }
       }
 
+      /** Notification système : atteint l'utilisateur même si l'onglet est en arrière-plan. */
+      function notify(item, cause) {
+        try {
+          if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+          new Notification(`${item.project} — ${item.kind === 'back' ? 'Back-office' : 'Front'} en panne`, {
+            body: `${item.label || item.url}\n${cause ?? ''}`,
+            tag: `supervision-${item.id}`,
+          });
+        } catch {
+          /* Certains navigateurs refusent les notifications depuis un fichier local. */
+        }
+      }
+
+      /** Pastille rouge sur l'icône de l'onglet, visible sans lire le titre. */
+      function paintFavicon(alerting) {
+        try {
+          const canvas = el('canvas', { width: 64, height: 64 });
+          const context = canvas.getContext('2d');
+          context.font = '52px serif';
+          context.textAlign = 'center';
+          context.textBaseline = 'middle';
+          context.fillText('📡', 32, 36);
+          if (alerting) {
+            context.beginPath();
+            context.arc(48, 16, 15, 0, Math.PI * 2);
+            context.fillStyle = '#d02f2f';
+            context.fill();
+            context.fillStyle = '#fff';
+            context.font = 'bold 20px system-ui, sans-serif';
+            context.fillText(alerting > 9 ? '9+' : String(alerting), 48, 17);
+          }
+          document.querySelector('link[rel=icon]').href = canvas.toDataURL('image/png');
+        } catch {
+          /* L'icône reste celle par défaut si le navigateur refuse le rendu. */
+        }
+      }
+
       async function checkItem(item) {
         const host = hostOf(item.url);
+        // Empêche qu'un clic répété sur « Tester » ne contourne l'espacement des requêtes.
+        if (inFlightHosts.has(host)) return;
         inFlightHosts.add(host);
         inFlight += 1;
+        // Tout ce qui suit est encadré : une erreur imprévue ne doit jamais laisser
+        // l'hôte marqué occupé, ce qui bloquerait définitivement ses tests.
         try {
+          render();
           const result = await probe(item);
           const failed = result.status === 'down';
           const undetermined = result.status === 'unknown';
@@ -734,16 +869,32 @@
           const spaced = item.failures >= 5 ? Math.min(interval * 4, 900) : interval;
           item.nextCheck = Date.now() + withJitter(spaced) * 1000;
           // On n'alerte qu'au basculement en panne, pas à chaque test qui échoue.
-          if (item.status === 'down' && !wasDown) beep();
+          if (item.status === 'down' && !wasDown) {
+            beep();
+            notify(item, result.error);
+          }
           save();
-          render();
         } finally {
           inFlightHosts.delete(host);
           inFlight -= 1;
+          // Rafraîchissement après libération, sans quoi le bouton « Tester » resterait
+          // grisé jusqu'au prochain cycle d'affichage.
+          render();
         }
       }
 
+      let monitoring = true;
+
       function tick() {
+        const owner = holdsLock();
+        if (owner !== monitoring) {
+          monitoring = owner;
+          render();
+        }
+        if (!owner) return;
+        // Le battement n'est écrit que par l'onglet qui surveille réellement :
+        // il atteste d'une observation, pas d'une simple page ouverte.
+        localStorage.setItem(HEARTBEAT_KEY, String(Date.now()));
         if (store.paused) return;
         const due = store.items
           .filter((item) => item.enabled && (item.nextCheck ?? 0) <= Date.now())
@@ -751,7 +902,7 @@
         for (const item of due) {
           if (inFlight >= MAX_CONCURRENT) break;
           if (inFlightHosts.has(hostOf(item.url))) continue;
-          checkItem(item);
+          checkItem(item).catch((err) => console.warn('Test interrompu', err));
         }
       }
 
@@ -844,7 +995,11 @@
               el('td', { class: 'detail-cell', textContent: describeRow(item) }),
               el('td', {}, [
                 el('div', { class: 'row-actions' }, [
-                  el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Tester', onclick: () => checkItem(item) }),
+                  el('button', {
+                    class: 'btn btn-sm', type: 'button', textContent: 'Tester',
+                    disabled: inFlightHosts.has(hostOf(item.url)),
+                    onclick: () => checkItem(item),
+                  }),
                   el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Détail', onclick: () => openDetail(item) }),
                   el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Éditer', onclick: () => openForm(item) }),
                   el('button', { class: 'btn btn-sm', type: 'button', textContent: 'Suppr.', onclick: () => removeItem(item) }),
@@ -859,6 +1014,11 @@
         document.title = alerting
           ? `(${alerting}) Supervision des URL projets`
           : 'Supervision des URL projets';
+        if (render.lastAlerting !== alerting) {
+          render.lastAlerting = alerting;
+          paintFavicon(alerting);
+        }
+        $('lockNotice').hidden = monitoring;
         $('soundBtn').textContent = `Alerte sonore : ${store.sound ? 'activée' : 'coupée'}`;
 
         $('lastUpdate').textContent = store.items.length
@@ -903,8 +1063,24 @@
         $('formDialog').showModal();
       }
 
-      function openDetail(item) {
-        const history = item.history ?? [];
+      async function openDetail(item) {
+        // Historique lu dans la base durable ; item.history ne sert que de secours.
+        let history = item.history ?? [];
+        try {
+          const stored = await tx('checks', 'readonly', (store) => {
+            const rows = [];
+            const cursor = store.index('urlId').openCursor(IDBKeyRange.only(item.id), 'prev');
+            cursor.onsuccess = () => {
+              if (!cursor.result || rows.length >= 200) return;
+              rows.push(cursor.result.value);
+              cursor.result.continue();
+            };
+            return { get result() { return rows; } };
+          });
+          if (stored.length) history = stored;
+        } catch (err) {
+          console.warn('Historique détaillé illisible', err);
+        }
         const maxMs = history.reduce((max, h) => Math.max(max, h.ms ?? 0), 0);
         const avgMs = history.length
           ? Math.round(history.reduce((sum, h) => sum + (h.ms ?? 0), 0) / history.length)
@@ -954,8 +1130,11 @@
         $('detailDialog').showModal();
       }
 
-      function removeItem(item) {
+      async function removeItem(item) {
         if (!confirm(`Supprimer la surveillance de ${item.url} ?`)) return;
+        // L'incident en cours doit être refermé, sinon sa durée continuerait de courir
+        // indéfiniment dans les rapports.
+        await closeIncident(item.incidentId, new Date().toISOString(), ' — clôturé : URL supprimée');
         store.items = store.items.filter((candidate) => candidate.id !== item.id);
         save();
         render();
@@ -1057,7 +1236,7 @@
         const start = new Date(`${month}-01T00:00:00`);
         const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
         const now = Date.now();
-        const [days, incidents] = await Promise.all([dbGetAll('days'), dbGetAll('incidents')]);
+        const [days, incidents, gaps] = await Promise.all([dbGetAll('days'), dbGetAll('incidents'), dbGetAll('gaps')]);
 
         const monthIncidents = incidents
           .filter((incident) => {
@@ -1079,10 +1258,11 @@
         const totals = new Map();
         for (const day of days) {
           if (!day.day.startsWith(month)) continue;
-          const entry = totals.get(day.urlId) ?? { checks: 0, failures: 0, slow: 0, sumMs: 0, maxMs: 0 };
+          const entry = totals.get(day.urlId) ?? { checks: 0, failures: 0, slow: 0, undetermined: 0, sumMs: 0, maxMs: 0 };
           entry.checks += day.checks;
           entry.failures += day.failures;
           entry.slow += day.slow;
+          entry.undetermined += day.undetermined ?? 0;
           entry.sumMs += day.sumMs;
           entry.maxMs = Math.max(entry.maxMs, day.maxMs);
           totals.set(day.urlId, entry);
@@ -1098,14 +1278,18 @@
         const rows = [...new Set([...totals.keys(), ...downtimeByUrl.keys()])]
           .map((urlId) => {
             const info = identity.get(urlId) ?? { project: '(URL supprimée)', label: urlId, url: '' };
-            const stats = totals.get(urlId) ?? { checks: 0, failures: 0, slow: 0, sumMs: 0, maxMs: 0 };
-            const uptime = stats.checks ? ((stats.checks - stats.failures) / stats.checks) * 100 : null;
+            const stats = totals.get(urlId) ?? { checks: 0, failures: 0, slow: 0, undetermined: 0, sumMs: 0, maxMs: 0 };
+            // Un test indéterminé ne prouve rien : l'exclure des deux termes évite de
+            // gonfler artificiellement le taux de disponibilité.
+            const conclusive = stats.checks - stats.undetermined;
+            const uptime = conclusive > 0 ? ((conclusive - stats.failures) / conclusive) * 100 : null;
             return {
               project: info.project ?? '', client: info.client ?? '', owner: info.owner ?? '',
               label: info.label ?? '', url: info.url ?? '',
               kind: info.kind === 'back' ? 'Back-office' : 'Front',
               priority: info.priority ?? '',
               checks: stats.checks, failures: stats.failures, slow: stats.slow,
+              undetermined: stats.undetermined, conclusive,
               uptime, avgMs: stats.checks ? Math.round(stats.sumMs / stats.checks) : null, maxMs: stats.maxMs,
               downtimeMs: downtimeByUrl.get(urlId) ?? 0,
               incidents: monthIncidents.filter((incident) => incident.urlId === urlId).length,
@@ -1113,18 +1297,42 @@
           })
           .sort((a, b) => b.downtimeMs - a.downtimeMs || (a.uptime ?? 100) - (b.uptime ?? 100));
 
+        // Couverture : part du mois pendant laquelle la surveillance a réellement tourné.
+        // Sans elle, un taux de disponibilité de 100 % ne voudrait rien dire.
+        const elapsedFrom = start.getTime();
+        const elapsedTo = Math.min(end.getTime(), now);
+        const elapsed = Math.max(0, elapsedTo - elapsedFrom);
+        const monthGaps = gaps
+          .map((gap) => ({
+            from: Math.max(new Date(gap.from).getTime(), elapsedFrom),
+            to: Math.min(new Date(gap.to).getTime(), elapsedTo),
+          }))
+          .filter((gap) => gap.to > gap.from)
+          .sort((a, b) => a.from - b.from);
+        // Fusion des périodes qui se chevauchent, pour ne pas les compter deux fois.
+        const merged = [];
+        for (const gap of monthGaps) {
+          const last = merged[merged.length - 1];
+          if (last && gap.from <= last.to) last.to = Math.max(last.to, gap.to);
+          else merged.push({ ...gap });
+        }
+        const gapMs = merged.reduce((sum, gap) => sum + (gap.to - gap.from), 0);
+
         reportCache = {
-          rows, incidents: monthIncidents,
+          rows, incidents: monthIncidents, gaps: merged,
+          coverage: elapsed > 0 ? ((elapsed - gapMs) / elapsed) * 100 : null,
+          gapMs, elapsed,
           label: start.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }),
         };
         renderReport();
       }
 
       function renderReport() {
-        const { rows, incidents, label } = reportCache;
+        const { rows, incidents, label, coverage, gaps, gapMs } = reportCache;
         const totalChecks = rows.reduce((sum, row) => sum + row.checks, 0);
+        const totalConclusive = rows.reduce((sum, row) => sum + (row.conclusive ?? row.checks), 0);
         const totalFailures = rows.reduce((sum, row) => sum + row.failures, 0);
-        const globalUptime = totalChecks ? ((totalChecks - totalFailures) / totalChecks) * 100 : null;
+        const globalUptime = totalConclusive > 0 ? ((totalConclusive - totalFailures) / totalConclusive) * 100 : null;
         const totalDowntime = rows.reduce((sum, row) => sum + row.downtimeMs, 0);
 
         $('reportContent').replaceChildren(
@@ -1141,7 +1349,22 @@
             ]),
             el('div', {}, [el('span', { textContent: 'Incidents' }), el('strong', { textContent: String(incidents.length) })]),
             el('div', {}, [el('span', { textContent: 'Indisponibilité cumulée' }), el('strong', { textContent: formatDuration(totalDowntime) })]),
+            el('div', {}, [
+              el('span', { textContent: 'Couverture de surveillance' }),
+              el('strong', {
+                class: coverage === null ? '' : coverage < 90 ? 'uptime-bad' : coverage < 99 ? 'uptime-warn' : 'uptime-good',
+                textContent: coverage === null ? '—' : `${coverage.toFixed(1)} %`,
+              }),
+            ]),
           ]),
+
+          coverage !== null && coverage < 99.9
+            ? el('p', { class: 'muted', style: 'margin:-6px 0 14px' }, [
+                `Les chiffres ci-dessus ne portent que sur les périodes réellement observées : `,
+                el('strong', { textContent: formatDuration(gapMs) }),
+                ` sans surveillance sur le mois (onglet fermé ou poste éteint). Une panne survenue pendant ces périodes n'apparaît pas.`,
+              ])
+            : null,
 
           el('div', { class: 'report-section' }, [
             el('h3', { textContent: 'Disponibilité par URL' }),
@@ -1201,13 +1424,37 @@
                 ])
               : el('p', { class: 'muted', textContent: 'Aucun incident sur la période. ' }),
           ]),
+
+          gaps.length
+            ? el('div', { class: 'report-section' }, [
+                el('h3', { textContent: `Périodes non surveillées (${gaps.length})` }),
+                el('div', { class: 'report-table' }, [
+                  el('table', {}, [
+                    el('thead', {}, el('tr', {}, ['Début', 'Fin', 'Durée'].map((header) => el('th', { textContent: header })))),
+                    el('tbody', {}, gaps.map((gap) =>
+                      el('tr', {}, [
+                        el('td', { textContent: formatDateTime(new Date(gap.from).toISOString()) }),
+                        el('td', { textContent: formatDateTime(new Date(gap.to).toISOString()) }),
+                        el('td', { textContent: formatDuration(gap.to - gap.from) }),
+                      ]),
+                    )),
+                  ]),
+                ]),
+              ])
+            : null,
         );
       }
 
       function downloadCsv(filename, rows) {
         // Séparateur point-virgule et BOM : Excel en configuration française ouvre
         // le fichier directement, sans assistant d'importation.
-        const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+        // Une cellule commençant par =, +, - ou @ serait interprétée comme une formule
+        // par Excel : on la neutralise avec une apostrophe.
+        const escape = (value) => {
+          const text = String(value ?? '');
+          const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+          return `"${safe.replace(/"/g, '""')}"`;
+        };
         const csv = rows.map((row) => row.map(escape).join(';')).join('\r\n');
         const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
         const link = el('a', { href: url, download: filename });
@@ -1318,6 +1565,26 @@
         );
       });
 
+      if (typeof Notification !== 'undefined') {
+        const notifyBtn = $('notifyBtn');
+        const refresh = () => {
+          notifyBtn.textContent =
+            Notification.permission === 'granted' ? 'Notifications : activées' : 'Activer les notifications';
+          notifyBtn.hidden = false;
+        };
+        refresh();
+        notifyBtn.addEventListener('click', async () => {
+          try {
+            await Notification.requestPermission();
+            refresh();
+            // Un navigateur peut refuser sans erreur : on masque alors le bouton.
+            if (Notification.permission === 'denied') notifyBtn.textContent = 'Notifications refusées';
+          } catch {
+            notifyBtn.hidden = true;
+          }
+        });
+      }
+
       $('soundBtn').addEventListener('click', () => {
         store.sound = !store.sound;
         save();
@@ -1325,8 +1592,15 @@
         if (store.sound) beep();
       });
 
-      $('pauseBtn').addEventListener('click', () => {
+      $('pauseBtn').addEventListener('click', async () => {
         store.paused = !store.paused;
+        if (store.paused) {
+          const at = new Date().toISOString();
+          for (const item of store.items) {
+            await closeIncident(item.incidentId, at, ' — clôturé : mise en pause');
+            item.incidentId = null;
+          }
+        }
         save();
         render();
       });
@@ -1337,7 +1611,10 @@
         const [days, incidents] = await Promise.all([dbGetAll('days'), dbGetAll('incidents')]).catch(() => [[], []]);
         const payload = {
           exportedAt: new Date().toISOString(),
-          items: store.items.map(({ history, ...rest }) => rest),
+          // L'état d'exécution ne se transporte pas : il se rapporte à ce navigateur.
+          items: store.items.map(
+            ({ history, incidentId, firstFailureAt, corsBlocked, corsRetryAt, checksSinceCors, ...rest }) => rest,
+          ),
           days, incidents,
         };
         const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
@@ -1357,23 +1634,55 @@
           const parsed = JSON.parse(await file.text());
           if (!Array.isArray(parsed.items)) throw new Error('format');
           const known = new Set(store.items.map((item) => item.url + item.kind));
-          const added = parsed.items.filter((item) => item.url && !known.has(item.url + item.kind));
+          const usedIds = new Set(store.items.map((item) => item.id));
+          const isValidUrl = (value) => {
+            try {
+              const parsedUrl = new URL(String(value));
+              return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+            } catch {
+              return false;
+            }
+          };
+          const number = (value, fallback, min) => {
+            const result = Number(value);
+            return Number.isFinite(result) && result >= min ? result : fallback;
+          };
+          const added = parsed.items.filter((item) => isValidUrl(item.url) && !known.has(item.url + item.kind));
           store.items.push(
             ...added.map((item) => ({
               ...item,
-              id: `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
+              // L'identifiant d'origine est conservé, sans quoi l'historique et les
+              // incidents restaurés ne se rattacheraient plus à aucune URL.
+              id: item.id && !usedIds.has(item.id) ? item.id : `u${Date.now()}${Math.random().toString(36).slice(2, 7)}`,
+              project: String(item.project ?? '').slice(0, 120),
+              kind: item.kind === 'back' ? 'back' : 'front',
+              priority: ['P1', 'P2', 'P3'].includes(item.priority) ? item.priority : 'P2',
+              intervalSec: number(item.intervalSec, 300, MIN_INTERVAL_SEC),
+              slowMs: number(item.slowMs, 3000, 1),
+              timeoutMs: number(item.timeoutMs, 10000, 1000),
+              expectedStatus: number(item.expectedStatus, 200, 100),
+              enabled: item.enabled !== false,
               status: 'unknown', failures: 0, history: [], nextCheck: 0,
+              incidentId: null, firstFailureAt: null, corsBlocked: false,
             })),
           );
+          for (const item of added) usedIds.add(item.id);
           // Restauration de l'historique : les agrégats sont remplacés à l'identique,
           // les incidents ne sont ajoutés que s'ils sont absents.
           let restoredDays = 0;
           let restoredIncidents = 0;
           if (Array.isArray(parsed.days) && parsed.days.length) {
-            await tx('days', 'readwrite', (store) => {
-              for (const day of parsed.days) store.put(day);
+            // Une sauvegarde ancienne ne doit pas écraser des mesures plus récentes :
+            // on garde, pour chaque jour, l'enregistrement le plus fourni.
+            const existingDays = new Map((await dbGetAll('days')).map((day) => [day.key, day]));
+            const toWrite = parsed.days.filter((day) => {
+              const current = existingDays.get(day.key);
+              return !current || (day.checks ?? 0) > (current.checks ?? 0);
             });
-            restoredDays = parsed.days.length;
+            await tx('days', 'readwrite', (store) => {
+              for (const day of toWrite) store.put(day);
+            });
+            restoredDays = toWrite.length;
           }
           if (Array.isArray(parsed.incidents) && parsed.incidents.length) {
             const existing = new Set((await dbGetAll('incidents')).map((inc) => `${inc.urlId}|${inc.startedAt}`));
@@ -1413,8 +1722,17 @@
       render();
       setInterval(tick, 5000);
       setInterval(render, 20000);
-      tick();
-      pruneRawChecks();
+      setInterval(() => {
+        if (monitoring) localStorage.setItem(HEARTBEAT_KEY, String(Date.now()));
+      }, HEARTBEAT_MS);
+      setInterval(pruneRawChecks, 12 * 3600 * 1000);
+      // La reprise doit précéder toute nouvelle mesure, pour que l'interruption soit
+      // datée avant que le battement ne soit rafraîchi.
+      recoverFromGap().finally(() => {
+        tick();
+        pruneRawChecks();
+        render();
+      });
     </script>
   </body>
 </html>

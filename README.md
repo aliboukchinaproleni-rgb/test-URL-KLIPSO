@@ -82,6 +82,12 @@ par le navigateur, tant que l'onglet reste ouvert.
 - Alerte sonore et nombre d'anomalies repris dans le titre de l'onglet
 - Rapport mensuel de disponibilité et journal des incidents horodaté, exportables en CSV
 - Sauvegarde et restauration complètes (configuration, historique, incidents) en un fichier JSON
+- Notifications système au basculement en panne, et pastille rouge sur l'icône de l'onglet
+- Taux de couverture de surveillance : les périodes pendant lesquelles l'onglet était fermé sont
+  enregistrées et déduites du rapport, afin qu'un taux de disponibilité ne porte que sur ce qui a
+  réellement été observé
+- Verrou entre onglets : si le fichier est ouvert plusieurs fois, un seul onglet effectue les
+  tests, les autres se contentent d'afficher
 
 Limite propre au navigateur : il n'a pas le droit de lire la réponse d'un site tiers, donc une
 erreur HTTP 500 passe inaperçue par défaut. Le bouton « Détection des erreurs 500 » permet
