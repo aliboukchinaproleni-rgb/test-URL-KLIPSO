@@ -187,13 +187,16 @@
 
       <div class="notice" id="notice">
         <button class="btn btn-sm" type="button" id="noticeClose">J'ai compris</button>
-        <strong>À faire avant de vous fier aux résultats</strong>
-        Les tests sont effectués par votre navigateur, qui n'a pas le droit de lire la réponse d'un
-        site tiers : par défaut, une erreur HTTP 500 s'affiche donc en vert. Pour détecter les erreurs
-        serveur, ouvrez <strong style="display:inline">Détection des erreurs 500</strong> en haut à
-        droite et activez un relais. La colonne « Contrôle » indique ensuite, pour chaque URL, si le
-        code HTTP a réellement été vérifié. La surveillance ne tourne par ailleurs que tant que cet
-        onglet reste ouvert.
+        <strong>Deux limites à connaître avant de vous fier aux résultats</strong>
+        Les tests sont effectués par votre navigateur. Lorsque le site l'autorise, la réponse est lue
+        intégralement et les erreurs serveur sont détectées&nbsp;; sinon le navigateur constate
+        seulement que le serveur a répondu, et
+        <strong style="display:inline">une erreur HTTP 500 passe alors pour un site sain</strong>.
+        La colonne « Contrôle » indique le niveau obtenu pour chaque URL, et le bouton
+        <strong style="display:inline">Détection des erreurs 500</strong> permet de lever cette
+        limite. Par ailleurs, la surveillance ne tourne que tant que cet onglet reste ouvert : les
+        périodes non couvertes sont enregistrées et déduites du taux de couverture affiché dans le
+        rapport mensuel.
       </div>
 
       <section id="counters" class="counters"></section>
